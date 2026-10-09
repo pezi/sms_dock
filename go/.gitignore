@@ -1,0 +1,48 @@
+# Binaries of the tool, the examples and the fake server
+/smsdock
+/fakeserver
+/list_messages
+/send_sms
+/listen_incoming
+/auto_reply
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Tests, coverage and profiles
+*.test
+*.out
+coverage.*
+*.coverprofile
+*.prof
+
+# Go workspace and vendored modules
+go.work
+go.work.sum
+/vendor/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment: passwords and fingerprints stay out of git
+.env
+.env.*
+!.env.example
+
+# Certificates and keys made for tests
+*.pem
+*.key
+*.crt

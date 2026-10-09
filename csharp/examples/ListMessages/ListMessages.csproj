@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Runs on the newest installed runtime when .NET 8 itself is missing. -->
+    <RollForward>Major</RollForward>
+    <IsPackable>false</IsPackable>
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/SmsDock/SmsDock.csproj" />
+  </ItemGroup>
+
+</Project>

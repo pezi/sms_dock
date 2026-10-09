@@ -1,0 +1,27 @@
+# Dependencies; package-lock.json is kept in git
+node_modules/
+
+# npm
+npm-debug.log*
+.npm/
+*.tgz
+
+# Testing / coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local environment: passwords and fingerprints stay out of git
+.env
+.env.*
+!.env.example
+
+# Certificates and keys made for tests
+*.pem
+*.key
+*.crt

@@ -1,0 +1,31 @@
+# Dart tooling; pubspec.lock is kept in git because the package has an
+# executable
+.dart_tool/
+build/
+doc/api/
+
+# Compiled command-line tool
+/smsdock
+*.exe
+*.aot
+*.snapshot
+
+# Testing / coverage
+coverage/
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Local environment: passwords and fingerprints stay out of git
+.env
+.env.*
+!.env.example
+
+# Certificates and keys made for tests
+*.pem
+*.p12
+*.key
+*.crt

@@ -1,0 +1,40 @@
+# Build output of the projects. The directory bin/ at the top holds the
+# launcher script and is kept.
+/src/*/bin/
+/src/*/obj/
+/examples/*/bin/
+/examples/*/obj/
+/tests/*/bin/
+/tests/*/obj/
+*.nupkg
+*.snupkg
+
+# Tests / coverage
+TestResults/
+*.trx
+coverage.*
+
+# Editors / IDEs
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment: passwords and fingerprints stay out of git
+.env
+.env.*
+!.env.example
+
+# Certificates and keys made for tests
+*.pfx
+*.p12
+*.pem
+*.key
+*.crt

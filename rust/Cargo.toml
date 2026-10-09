@@ -1,0 +1,28 @@
+[package]
+name = "smsdock"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Client library and command-line tool for the WebSocket API of the SMS Dock app"
+readme = "README.md"
+keywords = ["sms", "websocket", "android"]
+categories = ["api-bindings", "command-line-utilities"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+subtle = "2"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+rcgen = "0.14"
+
+[[example]]
+name = "auto_reply"
+test = true

@@ -1,0 +1,2177 @@
+asyncapi: 3.0.0
+
+info:
+  title: SMS Dock WebSocket API
+  version: 1.0.0
+  description: |
+    SMS Dock turns an Android phone into an SMS hub. This API lets programs
+    read, send and delete SMS and react to incoming ones.
+
+    This document describes **protocol version 1**. The text form of the
+    same contract is `API.md`; if the two differ, `API.md` is right.
+
+    ## Transport
+
+    - WebSocket over TLS, `wss://PHONE_IP:9443/ws`. The port can be changed
+      in the app.
+    - Text frames only. Each frame is one UTF-8 JSON object. Frames sent
+      by the client may have at most 64 KiB; answers of the server can be
+      larger.
+    - At most 8 clients can be connected at once.
+    - The API needs the full licence of the app.
+
+    ## Certificate
+
+    The phone uses a self-signed certificate that names no host or address,
+    so ordinary verification cannot succeed. Clients pin it instead: they
+    compare the SHA-256 fingerprint of the certificate the server presents
+    with the fingerprint shown in the app (Server screen), and only then
+    send the password.
+
+    ## Requests and responses
+
+    A request is an object with an `action` and, optionally, an `id`
+    (string or number) that the response echoes. A response is either
+    `{"id", "ok": true, "result": {…}}` or
+    `{"id", "ok": false, "error": {"code", "message"}}`. Every response
+    has an `id`; it is `null` if the request had none or could not be
+    read.
+
+    ## Phone numbers
+
+    In `to`, spaces, dashes, dots, slashes and brackets are ignored.
+
+    Where a number selects messages (`messages.list.address`,
+    `subscribe.address`), it is compared the way the phone's messaging app
+    does: `+43 699 1234567`, `0043 699 1234567` and `0699 1234567` mean
+    the same peer. A number without country code matches if its digits
+    without leading zeros (at least 7) end the other number. Sender names
+    such as `MyBank` are compared as text, ignoring case.
+
+    ## Events
+
+    `seq` increases by one per event, counted over all events of the
+    phone. A client that subscribed to some events, or filters by number,
+    therefore sees gaps. The count restarts at 1 when the app is
+    restarted; `epoch` in the result of `authenticate` tells one run of
+    the app from the next. Events are not sent again: what happens while
+    a client is not connected is lost for it.
+
+    ## Objects
+
+    Timestamps are milliseconds since the Unix epoch. Fields that do not
+    apply are `null`, never left out.
+
+    ## Error codes
+
+    | Code | Meaning |
+    |---|---|
+    | `invalid_json` | The frame is not a JSON object |
+    | `invalid_request` | A field is missing or malformed |
+    | `unknown_action` | |
+    | `not_authenticated` | Authenticate first |
+    | `invalid_password` | |
+    | `locked_out` | Too many wrong passwords; `retryAfter` in the error object holds the seconds to wait |
+    | `licence_required` | The API needs the full licence |
+    | `quota_exceeded` | Daily sending limit of the free version reached |
+    | `rate_limited` | Too many requests per second (`retryAfter` holds the seconds to wait) or messages per minute |
+    | `permission_missing` | An Android permission is not granted; `permission` in the error object names it |
+    | `invalid_number` | |
+    | `message_too_long` | More than 10 SMS parts |
+    | `sim_unavailable` | The SIM is missing, or no default SMS SIM is set on the phone |
+    | `not_found` | |
+    | `not_default_app` | Needs SMS Dock as the phone's default SMS app |
+    | `send_failed` | Android refused the message |
+    | `internal_error` | |
+
+    ## Close codes
+
+    | Code | Meaning |
+    |---|---|
+    | 1000 | Normal |
+    | 1001 | Server is stopping |
+    | 1009 | Frame from the client larger than 64 KiB |
+    | 4400 | Protocol error, for example a binary frame |
+    | 4401 | Not authenticated in time, wrong password, or logins locked |
+    | 4403 | Licence required |
+    | 4408 | No answer to pings |
+    | 4409 | Too many clients |
+    | 4410 | Password was changed |
+    | 4429 | The client kept sending although its requests were answered with `rate_limited` |
+
+    ## Limits
+
+    | Limit | Value |
+    |---|---|
+    | Frame size, client to server | 64 KiB |
+    | Clients | 8 |
+    | Requests | 20 per second per connection |
+    | Sending | 20 SMS parts per minute for the whole phone |
+    | Message length | 10 SMS parts (1530 plain or 670 Unicode characters) |
+    | Page size | 200 |
+
+defaultContentType: application/json
+
+servers:
+  phone:
+    host: '{host}:{port}'
+    protocol: wss
+    description: |
+      The phone that runs SMS Dock, reached in the local network. The
+      WebSocket endpoint is the path `/ws` (see the channel `api`), so the
+      full address is `wss://192.168.1.50:9443/ws`.
+
+      The certificate is self-signed. Pin its SHA-256 fingerprint; do not
+      switch verification off without pinning. Do not expose the port to
+      the internet.
+
+      After 5 wrong passwords (web interface and API together) logins are
+      locked for 30 seconds, doubling up to 15 minutes.
+    variables:
+      host:
+        description: Address of the phone in the local network, shown in the app.
+        default: 192.168.1.50
+      port:
+        description: API port. It can be changed in the settings of the app.
+        default: '9443'
+
+channels:
+  api:
+    address: /ws
+    title: SMS Dock API
+    description: |
+      The only channel. All requests, responses and events travel over this
+      one WebSocket as text frames. Each frame is one UTF-8 JSON object.
+      Frames sent by the client may have at most 64 KiB; answers of the
+      server can be larger.
+
+      The server speaks first and sends `hello`. The client answers with
+      `authenticate`. After that the client sends requests and the server
+      answers each of them with one response. Responses may arrive in a
+      different order than the requests were sent, and events may arrive in
+      between; match responses by `id`.
+    servers:
+      - $ref: '#/servers/phone'
+    bindings:
+      ws:
+        bindingVersion: 0.1.0
+    messages:
+      hello:
+        $ref: '#/components/messages/hello'
+      authenticateRequest:
+        $ref: '#/components/messages/authenticateRequest'
+      authenticateResponse:
+        $ref: '#/components/messages/authenticateResponse'
+      getStatusRequest:
+        $ref: '#/components/messages/getStatusRequest'
+      getStatusResponse:
+        $ref: '#/components/messages/getStatusResponse'
+      listConversationsRequest:
+        $ref: '#/components/messages/listConversationsRequest'
+      listConversationsResponse:
+        $ref: '#/components/messages/listConversationsResponse'
+      listMessagesRequest:
+        $ref: '#/components/messages/listMessagesRequest'
+      listMessagesResponse:
+        $ref: '#/components/messages/listMessagesResponse'
+      getMessageRequest:
+        $ref: '#/components/messages/getMessageRequest'
+      getMessageResponse:
+        $ref: '#/components/messages/getMessageResponse'
+      sendMessageRequest:
+        $ref: '#/components/messages/sendMessageRequest'
+      sendMessageResponse:
+        $ref: '#/components/messages/sendMessageResponse'
+      getMessageStatusRequest:
+        $ref: '#/components/messages/getMessageStatusRequest'
+      getMessageStatusResponse:
+        $ref: '#/components/messages/getMessageStatusResponse'
+      deleteMessageRequest:
+        $ref: '#/components/messages/deleteMessageRequest'
+      deleteMessageResponse:
+        $ref: '#/components/messages/deleteMessageResponse'
+      deleteConversationRequest:
+        $ref: '#/components/messages/deleteConversationRequest'
+      deleteConversationResponse:
+        $ref: '#/components/messages/deleteConversationResponse'
+      markConversationReadRequest:
+        $ref: '#/components/messages/markConversationReadRequest'
+      markConversationReadResponse:
+        $ref: '#/components/messages/markConversationReadResponse'
+      listContactsRequest:
+        $ref: '#/components/messages/listContactsRequest'
+      listContactsResponse:
+        $ref: '#/components/messages/listContactsResponse'
+      subscribeRequest:
+        $ref: '#/components/messages/subscribeRequest'
+      subscribeResponse:
+        $ref: '#/components/messages/subscribeResponse'
+      unsubscribeRequest:
+        $ref: '#/components/messages/unsubscribeRequest'
+      unsubscribeResponse:
+        $ref: '#/components/messages/unsubscribeResponse'
+      pingRequest:
+        $ref: '#/components/messages/pingRequest'
+      pingResponse:
+        $ref: '#/components/messages/pingResponse'
+      errorResponse:
+        $ref: '#/components/messages/errorResponse'
+      smsReceived:
+        $ref: '#/components/messages/smsReceived'
+      smsQueued:
+        $ref: '#/components/messages/smsQueued'
+      smsSent:
+        $ref: '#/components/messages/smsSent'
+      smsDelivered:
+        $ref: '#/components/messages/smsDelivered'
+      smsFailed:
+        $ref: '#/components/messages/smsFailed'
+      smsDeleted:
+        $ref: '#/components/messages/smsDeleted'
+      conversationsChanged:
+        $ref: '#/components/messages/conversationsChanged'
+
+operations:
+  sayHello:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: Greeting of the server
+    description: |
+      Sent by the server as the first frame after the WebSocket opens. The
+      client must answer within 10 seconds with `authenticate`; otherwise
+      the server closes the connection with code 4401.
+    messages:
+      - $ref: '#/channels/api/messages/hello'
+  authenticate:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Log in
+    description: |
+      Action `authenticate`. Must be the first request, at most 10 seconds
+      after `hello`. On `invalid_password` and `locked_out` the server closes
+      the connection with code 4401, on `licence_required` with code 4403.
+      After 5 wrong passwords (web interface and API together) logins are
+      locked for 30 seconds, doubling up to 15 minutes. The result tells
+      `latestSeq`, the sequence number of the newest event so far, and
+      `epoch`, which identifies one run of the app.
+    messages:
+      - $ref: '#/channels/api/messages/authenticateRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/authenticateResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  getStatus:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Phone, SIMs, permissions, limits
+    description: |
+      Action `status`. No fields. Before the login the answer is the error
+      `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/getStatusRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/getStatusResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  listConversations:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Conversations, one per phone number
+    description: |
+      Action `conversations.list`. Returns a page of conversations, newest
+      first. Before the login the answer is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/listConversationsRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/listConversationsResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  listMessages:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Messages, filtered and paged
+    description: |
+      Action `messages.list`. Returns a page of messages, newest first. The
+      last 10 incoming messages: `direction` `in`, `limit` 10.
+      `conversationId` wins if `address` is given too. Before the login the
+      answer is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/listMessagesRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/listMessagesResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  getMessage:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: One message
+    description: |
+      Action `messages.get`. Returns one message. Before the login the answer
+      is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/getMessageRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/getMessageResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  sendMessage:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Send an SMS
+    description: |
+      Action `messages.send`. Hands an SMS to the phone for sending. The
+      outcome arrives as `sms.sent`, `sms.delivered` or `sms.failed` events
+      and can be read with `messages.status`. Sending exactly once: if the
+      connection breaks, send the request again with the same `requestId`. The
+      phone does not send twice but answers with the SendResult of the first
+      request and its current `status`. A `requestId` is remembered for 30
+      days, also across restarts of the app. Using it again for another
+      recipient or text is answered with `invalid_request`. A repeat never
+      sends again, also not after the first attempt failed: the answer then
+      has the status `failed`. To try again, use a new `requestId`. Before the
+      login the answer is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/sendMessageRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/sendMessageResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  getMessageStatus:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: State of a sent SMS
+    description: |
+      Action `messages.status`. Returns the outbox entry of a message sent
+      through SMS Dock. Before the login the answer is the error
+      `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/getMessageStatusRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/getMessageStatusResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  deleteMessage:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Delete one message
+    description: |
+      Action `messages.delete`. With mode `hidden` the message disappears from
+      SMS Dock (web interface and API) but stays on the phone. With mode
+      `provider` it is removed from the phone; this needs SMS Dock to be the
+      phone's default SMS app. `status.deleteMode` tells which one applies.
+      Before the login the answer is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/deleteMessageRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/deleteMessageResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  deleteConversation:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Delete a conversation
+    description: |
+      Action `conversations.delete`. Deletes all messages of a conversation.
+      `deleted` is the number of messages. Before the login the answer is the
+      error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/deleteConversationRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/deleteConversationResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  markConversationRead:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Mark a conversation as read
+    description: |
+      Action `conversations.markRead`. Marks all messages of a conversation as
+      read. Android lets only the default SMS app change messages; otherwise
+      the answer is the error `not_default_app`. Before the login the answer
+      is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/markConversationReadRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/markConversationReadResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  listContacts:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Contacts of the phone
+    description: |
+      Action `contacts.list`. Returns a page of contacts, sorted by name.
+      Before the login the answer is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/listContactsRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/listContactsResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  subscribe:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Choose events
+    description: |
+      Action `subscribe`. Adds the names to the subscription. `address`
+      replaces the filter; without `address`, or with `null`, the filter is
+      removed. The filter applies to events that name a peer;
+      `conversations.changed` and events whose number is not known are always
+      delivered. The result is the subscription now in force, with `*`
+      replaced by the names it stands for. A new connection is subscribed to
+      nothing. Before the login the answer is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/subscribeRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/subscribeResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  unsubscribe:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Stop events
+    description: |
+      Action `unsubscribe`. Removes the names from the subscription. When no
+      name is left, the filter is removed too. The result is the subscription
+      now in force. Before the login the answer is the error
+      `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/unsubscribeRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/unsubscribeResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  ping:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Keep-alive
+    description: |
+      Action `ping`. Returns the time of the phone. The server also sends
+      WebSocket pings every 20 seconds and closes connections that do not
+      answer within 45 seconds (close code 4408). Before the login the answer
+      is the error `not_authenticated`.
+    messages:
+      - $ref: '#/channels/api/messages/pingRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/pingResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  notifySmsReceived:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: An SMS arrived
+    description: |
+      Event `sms.received`. Sent without being asked for to every client that
+      subscribed to `sms.received` or to `*`.
+    messages:
+      - $ref: '#/channels/api/messages/smsReceived'
+  notifySmsQueued:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: SMS Dock accepted a message for sending
+    description: |
+      Event `sms.queued`. Sent without being asked for to every client that
+      subscribed to `sms.queued` or to `*`.
+    messages:
+      - $ref: '#/channels/api/messages/smsQueued'
+  notifySmsSent:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: The network accepted a message
+    description: |
+      Event `sms.sent`. Sent without being asked for to every client that
+      subscribed to `sms.sent` or to `*`.
+    messages:
+      - $ref: '#/channels/api/messages/smsSent'
+  notifySmsDelivered:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: The recipient's phone confirmed receipt
+    description: |
+      Event `sms.delivered`. Sent without being asked for to every client that
+      subscribed to `sms.delivered` or to `*`.
+    messages:
+      - $ref: '#/channels/api/messages/smsDelivered'
+  notifySmsFailed:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: Sending failed
+    description: |
+      Event `sms.failed`. Sent without being asked for to every client that
+      subscribed to `sms.failed` or to `*`.
+    messages:
+      - $ref: '#/channels/api/messages/smsFailed'
+  notifySmsDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: A message or a conversation was deleted
+    description: |
+      Event `sms.deleted`. Sent without being asked for to every client that
+      subscribed to `sms.deleted` or to `*`.
+    messages:
+      - $ref: '#/channels/api/messages/smsDeleted'
+  notifyConversationsChanged:
+    action: send
+    channel:
+      $ref: '#/channels/api'
+    summary: Messages changed outside SMS Dock
+    description: |
+      Event `conversations.changed`. Sent without being asked for to every client that
+      subscribed to `conversations.changed` or to `*`.
+    messages:
+      - $ref: '#/channels/api/messages/conversationsChanged'
+
+components:
+  correlationIds:
+    requestId:
+      description: The response echoes the `id` of the request.
+      location: $message.payload#/id
+
+  messages:
+    hello:
+      name: hello
+      title: hello
+      summary: First frame of every connection
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/Hello'
+      examples:
+        - name: hello
+          payload: {"event": "hello", "protocolVersion": 1, "authenticationRequired": true}
+    authenticateRequest:
+      name: authenticateRequest
+      title: authenticate request
+      summary: Log in
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/AuthenticateRequest'
+      examples:
+        - name: authenticate
+          payload: {"id": "1", "action": "authenticate", "password": "your password"}
+    authenticateResponse:
+      name: authenticateResponse
+      title: authenticate response
+      summary: Success of authenticate
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/AuthenticateResult'
+      examples:
+        - name: authenticate
+          payload: {"id": "1", "ok": true, "result": {"protocolVersion": 1, "app": {"name": "SMS Dock", "version": "1.0.0", "protocolVersion": 1}, "latestSeq": 42, "epoch": 1790672000000}}
+    getStatusRequest:
+      name: getStatusRequest
+      title: status request
+      summary: Phone, SIMs, permissions, limits
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/StatusRequest'
+      examples:
+        - name: getStatus
+          payload: {"id": "2", "action": "status"}
+    getStatusResponse:
+      name: getStatusResponse
+      title: status response
+      summary: Success of status
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/Status'
+      examples:
+        - name: getStatus
+          payload: {"id": "2", "ok": true, "result": {"app": {"name": "SMS Dock", "version": "1.0.0", "protocolVersion": 1}, "sims": [{"subscriptionId": 1, "slot": 0, "name": "Play", "number": null, "isDefault": true}], "permissions": {"readSms": true, "sendSms": true, "receiveSms": true, "contacts": true, "phoneState": true, "notifications": true}, "defaultSmsApp": false, "deleteMode": "hidden", "licence": {"enforced": false, "licensed": false, "dailyLimit": 10, "sentToday": 3, "remaining": null}, "popup": true}}
+    listConversationsRequest:
+      name: listConversationsRequest
+      title: conversations.list request
+      summary: Conversations, one per phone number
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/ConversationsListRequest'
+      examples:
+        - name: listConversations
+          payload: {"id": "3", "action": "conversations.list", "unread": true, "limit": 20}
+    listConversationsResponse:
+      name: listConversationsResponse
+      title: conversations.list response
+      summary: Success of conversations.list
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/ConversationPage'
+      examples:
+        - name: listConversations
+          payload: {"id": "3", "ok": true, "result": {"items": [{"id": 179, "address": "+4369912345678", "contact": "Anna Example", "snippet": "Hello", "timestamp": 1790672531000, "direction": "in", "messageCount": 12, "unreadCount": 1, "sim": 1}], "nextCursor": null}}
+    listMessagesRequest:
+      name: listMessagesRequest
+      title: messages.list request
+      summary: Messages, filtered and paged
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/MessagesListRequest'
+      examples:
+        - name: listMessages
+          payload: {"id": "7", "action": "messages.list", "direction": "in", "limit": 10}
+    listMessagesResponse:
+      name: listMessagesResponse
+      title: messages.list response
+      summary: Success of messages.list
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/MessagePage'
+      examples:
+        - name: listMessages
+          payload: {"id": "7", "ok": true, "result": {"items": [{"id": 2815, "conversationId": 179, "address": "+4369912345678", "contact": null, "direction": "in", "body": "STATUS", "timestamp": 1790672531000, "sentTimestamp": 1790672529000, "read": false, "status": "received", "sim": 1, "requestId": null}], "nextCursor": "1790672531000:2815"}}
+    getMessageRequest:
+      name: getMessageRequest
+      title: messages.get request
+      summary: One message
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/MessagesGetRequest'
+      examples:
+        - name: getMessage
+          payload: {"id": "3", "action": "messages.get", "messageId": 2813}
+    getMessageResponse:
+      name: getMessageResponse
+      title: messages.get response
+      summary: Success of messages.get
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/Message'
+      examples:
+        - name: getMessage
+          payload: {"id": "3", "ok": true, "result": {"id": 2815, "conversationId": 179, "address": "+4369912345678", "contact": null, "direction": "in", "body": "STATUS", "timestamp": 1790672531000, "sentTimestamp": 1790672529000, "read": false, "status": "received", "sim": 1, "requestId": null}}
+    sendMessageRequest:
+      name: sendMessageRequest
+      title: messages.send request
+      summary: Send an SMS
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/MessagesSendRequest'
+      examples:
+        - name: sendMessage
+          payload: {"id": "8", "action": "messages.send", "to": "+4369912345678", "body": "All systems running.", "requestId": "b0c1d2"}
+    sendMessageResponse:
+      name: sendMessageResponse
+      title: messages.send response
+      summary: Success of messages.send
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/SendResult'
+      examples:
+        - name: sendMessage
+          payload: {"id": "8", "ok": true, "result": {"requestId": "b0c1d2", "to": "+4369912345678", "parts": 1, "status": "queued"}}
+    getMessageStatusRequest:
+      name: getMessageStatusRequest
+      title: messages.status request
+      summary: State of a sent SMS
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/MessagesStatusRequest'
+      examples:
+        - name: getMessageStatus
+          payload: {"id": "9", "action": "messages.status", "requestId": "b0c1d2"}
+    getMessageStatusResponse:
+      name: getMessageStatusResponse
+      title: messages.status response
+      summary: Success of messages.status
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/OutboxEntry'
+      examples:
+        - name: getMessageStatus
+          payload: {"id": "9", "ok": true, "result": {"requestId": "b0c1d2", "to": "+4369087654321", "parts": 2, "partsSent": 2, "status": "sent", "errorCode": null, "messageId": 2814, "sim": 1, "source": "api", "createdAt": 1790672531000}}
+    deleteMessageRequest:
+      name: deleteMessageRequest
+      title: messages.delete request
+      summary: Delete one message
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/MessagesDeleteRequest'
+      examples:
+        - name: deleteMessage
+          payload: {"id": "4", "action": "messages.delete", "messageId": 2813}
+    deleteMessageResponse:
+      name: deleteMessageResponse
+      title: messages.delete response
+      summary: Success of messages.delete
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/DeleteResult'
+      examples:
+        - name: deleteMessage
+          payload: {"id": "4", "ok": true, "result": {"deleted": 1, "mode": "hidden"}}
+    deleteConversationRequest:
+      name: deleteConversationRequest
+      title: conversations.delete request
+      summary: Delete a conversation
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/ConversationsDeleteRequest'
+      examples:
+        - name: deleteConversation
+          payload: {"id": "5", "action": "conversations.delete", "conversationId": 179}
+    deleteConversationResponse:
+      name: deleteConversationResponse
+      title: conversations.delete response
+      summary: Success of conversations.delete
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/DeleteResult'
+      examples:
+        - name: deleteConversation
+          payload: {"id": "5", "ok": true, "result": {"deleted": 12, "mode": "hidden"}}
+    markConversationReadRequest:
+      name: markConversationReadRequest
+      title: conversations.markRead request
+      summary: Mark a conversation as read
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/ConversationsMarkReadRequest'
+      examples:
+        - name: markConversationRead
+          payload: {"id": "6", "action": "conversations.markRead", "conversationId": 179}
+    markConversationReadResponse:
+      name: markConversationReadResponse
+      title: conversations.markRead response
+      summary: Success of conversations.markRead
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/MarkReadResult'
+      examples:
+        - name: markConversationRead
+          payload: {"id": "6", "ok": true, "result": {"ok": true}}
+    listContactsRequest:
+      name: listContactsRequest
+      title: contacts.list request
+      summary: Contacts of the phone
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/ContactsListRequest'
+      examples:
+        - name: listContacts
+          payload: {"id": "10", "action": "contacts.list", "q": "anna"}
+    listContactsResponse:
+      name: listContactsResponse
+      title: contacts.list response
+      summary: Success of contacts.list
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/ContactPage'
+      examples:
+        - name: listContacts
+          payload: {"id": "10", "ok": true, "result": {"items": [{"name": "Anna Example", "numbers": [{"number": "+4369912345678", "label": "Mobile"}]}], "nextCursor": null}}
+    subscribeRequest:
+      name: subscribeRequest
+      title: subscribe request
+      summary: Choose events
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/SubscribeRequest'
+      examples:
+        - name: subscribe
+          payload: {"id": "11", "action": "subscribe", "events": ["sms.received"], "address": "+4369912345678"}
+    subscribeResponse:
+      name: subscribeResponse
+      title: subscribe response
+      summary: Success of subscribe
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/Subscription'
+      examples:
+        - name: subscribe
+          payload: {"id": "11", "ok": true, "result": {"events": ["sms.received"], "address": "+4369912345678"}}
+    unsubscribeRequest:
+      name: unsubscribeRequest
+      title: unsubscribe request
+      summary: Stop events
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/UnsubscribeRequest'
+      examples:
+        - name: unsubscribe
+          payload: {"id": "12", "action": "unsubscribe", "events": ["*"]}
+    unsubscribeResponse:
+      name: unsubscribeResponse
+      title: unsubscribe response
+      summary: Success of unsubscribe
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/Subscription'
+      examples:
+        - name: unsubscribe
+          payload: {"id": "12", "ok": true, "result": {"events": [], "address": null}}
+    pingRequest:
+      name: pingRequest
+      title: ping request
+      summary: Keep-alive
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/PingRequest'
+      examples:
+        - name: ping
+          payload: {"id": "13", "action": "ping"}
+    pingResponse:
+      name: pingResponse
+      title: ping response
+      summary: Success of ping
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/PingResult'
+      examples:
+        - name: ping
+          payload: {"id": "13", "ok": true, "result": {"time": 1790672531000}}
+    errorResponse:
+      name: errorResponse
+      title: Error response
+      summary: Failure of any request
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/ErrorResponse'
+      examples:
+        - name: invalidRequest
+          payload: {"id": "7", "ok": false, "error": {"code": "invalid_request", "message": "'limit' must be between 1 and 200."}}
+        - name: lockedOut
+          payload: {"id": "1", "ok": false, "error": {"code": "locked_out", "message": "Too many attempts. Try again in 30 seconds.", "retryAfter": 30}}
+        - name: rateLimited
+          payload: {"id": "9", "ok": false, "error": {"code": "rate_limited", "message": "Too many requests.", "retryAfter": 1}}
+        - name: unreadableRequest
+          payload: {"id": null, "ok": false, "error": {"code": "invalid_json", "message": "The frame is not a JSON object."}}
+        - name: permissionMissing
+          payload: {"id": "8", "ok": false, "error": {"code": "permission_missing", "message": "The permission to send SMS is not granted.", "permission": "sendSms"}}
+    smsReceived:
+      name: smsReceived
+      title: sms.received
+      summary: An SMS arrived
+      contentType: application/json
+      payload:
+        type: object
+        required: [event, seq, data]
+        properties:
+          event:
+            type: string
+            const: sms.received
+          seq:
+            $ref: '#/components/schemas/Sequence'
+          data:
+            $ref: '#/components/schemas/SmsReceivedData'
+      examples:
+        - name: smsReceived
+          payload: {"event": "sms.received", "seq": 42, "data": {"message": {"id": 2815, "conversationId": 179, "address": "+4369912345678", "contact": null, "direction": "in", "body": "STATUS", "timestamp": 1790672531000, "sentTimestamp": 1790672529000, "read": false, "status": "received", "sim": 1, "requestId": null}}}
+    smsQueued:
+      name: smsQueued
+      title: sms.queued
+      summary: SMS Dock accepted a message for sending
+      contentType: application/json
+      payload:
+        type: object
+        required: [event, seq, data]
+        properties:
+          event:
+            type: string
+            const: sms.queued
+          seq:
+            $ref: '#/components/schemas/Sequence'
+          data:
+            $ref: '#/components/schemas/SmsQueuedData'
+      examples:
+        - name: smsQueued
+          payload: {"event": "sms.queued", "seq": 42, "data": {"requestId": "b0c1d2", "to": "+4369087654321", "parts": 1, "sim": 1, "source": "api"}}
+    smsSent:
+      name: smsSent
+      title: sms.sent
+      summary: The network accepted a message
+      contentType: application/json
+      payload:
+        type: object
+        required: [event, seq, data]
+        properties:
+          event:
+            type: string
+            const: sms.sent
+          seq:
+            $ref: '#/components/schemas/Sequence'
+          data:
+            $ref: '#/components/schemas/SmsSentData'
+      examples:
+        - name: smsSent
+          payload: {"event": "sms.sent", "seq": 42, "data": {"requestId": "b0c1d2", "conversationId": 180, "to": "+4369087654321", "message": {"id": 2814, "conversationId": 180, "address": "+4369087654321", "contact": null, "direction": "out", "body": "All systems running.", "timestamp": 1790672531000, "sentTimestamp": null, "read": true, "status": "sent", "sim": 1, "requestId": "b0c1d2"}}}
+    smsDelivered:
+      name: smsDelivered
+      title: sms.delivered
+      summary: The recipient's phone confirmed receipt
+      contentType: application/json
+      payload:
+        type: object
+        required: [event, seq, data]
+        properties:
+          event:
+            type: string
+            const: sms.delivered
+          seq:
+            $ref: '#/components/schemas/Sequence'
+          data:
+            $ref: '#/components/schemas/SmsDeliveredData'
+      examples:
+        - name: smsDelivered
+          payload: {"event": "sms.delivered", "seq": 42, "data": {"requestId": "b0c1d2", "id": 2814, "conversationId": 180, "to": "+4369087654321"}}
+    smsFailed:
+      name: smsFailed
+      title: sms.failed
+      summary: Sending failed
+      contentType: application/json
+      payload:
+        type: object
+        required: [event, seq, data]
+        properties:
+          event:
+            type: string
+            const: sms.failed
+          seq:
+            $ref: '#/components/schemas/Sequence'
+          data:
+            $ref: '#/components/schemas/SmsFailedData'
+      examples:
+        - name: smsFailed
+          payload: {"event": "sms.failed", "seq": 42, "data": {"requestId": "b0c1d2", "id": null, "conversationId": null, "to": "+4369087654321", "errorCode": 1, "reason": "generic_failure"}}
+    smsDeleted:
+      name: smsDeleted
+      title: sms.deleted
+      summary: A message or a conversation was deleted
+      contentType: application/json
+      payload:
+        type: object
+        required: [event, seq, data]
+        properties:
+          event:
+            type: string
+            const: sms.deleted
+          seq:
+            $ref: '#/components/schemas/Sequence'
+          data:
+            $ref: '#/components/schemas/SmsDeletedData'
+      examples:
+        - name: smsDeleted
+          payload: {"event": "sms.deleted", "seq": 42, "data": {"id": 2813, "conversationId": 179, "address": "+4369912345678", "mode": "hidden"}}
+    conversationsChanged:
+      name: conversationsChanged
+      title: conversations.changed
+      summary: Messages changed outside SMS Dock
+      contentType: application/json
+      payload:
+        type: object
+        required: [event, seq, data]
+        properties:
+          event:
+            type: string
+            const: conversations.changed
+          seq:
+            $ref: '#/components/schemas/Sequence'
+          data:
+            $ref: '#/components/schemas/EmptyData'
+      examples:
+        - name: conversationsChanged
+          payload: {"event": "conversations.changed", "seq": 42, "data": {}}
+
+  schemas:
+    RequestId:
+      description: |
+        Id of a request, chosen by the client. The response echoes it.
+        Optional.
+      oneOf:
+        - type: string
+        - type: number
+      examples:
+        - '7'
+
+    EchoedId:
+      description: |
+        The `id` of the request, unchanged. `null` when the request had
+        none or could not be read.
+      oneOf:
+        - type: string
+        - type: number
+        - type: 'null'
+
+    Timestamp:
+      type: integer
+      format: int64
+      description: Milliseconds since the Unix epoch.
+      examples:
+        - 1790672531000
+
+    SubscriptionId:
+      type: integer
+      description: Subscription id of a SIM, as in `Sim.subscriptionId`.
+      examples:
+        - 1
+
+    Limit:
+      type: integer
+      minimum: 1
+      maximum: 200
+      default: 50
+      description: Page size.
+
+    Cursor:
+      type: string
+      description: |
+        `nextCursor` of the previous page, passed back unchanged. The
+        content is opaque.
+      examples:
+        - '1790672531000:2813'
+
+    Direction:
+      type: string
+      enum: [in, out]
+      description: '`in` for incoming, `out` for outgoing.'
+
+    DeleteMode:
+      type: string
+      enum: [hidden, provider]
+      description: |
+        `hidden`: the message disappears from SMS Dock (web interface and
+        API) but stays on the phone. `provider`: it is removed from the
+        phone; this needs SMS Dock to be the phone's default SMS app.
+
+    EventName:
+      type: string
+      enum:
+        - sms.received
+        - sms.queued
+        - sms.sent
+        - sms.delivered
+        - sms.failed
+        - sms.deleted
+        - conversations.changed
+      description: Name of an event.
+
+    Sequence:
+      type: integer
+      minimum: 1
+      description: |
+        Number of the event. It increases by one per event, counted over
+        all events of the phone, and restarts at 1 when the app is
+        restarted.
+
+    Hello:
+      type: object
+      description: Greeting of the server. It has no `seq` and no `data`.
+      required: [event, protocolVersion, authenticationRequired]
+      properties:
+        event:
+          type: string
+          const: hello
+        protocolVersion:
+          type: integer
+          const: 1
+          description: Protocol version of the server.
+        authenticationRequired:
+          type: boolean
+          const: true
+          description: Always `true`.
+
+    # ---------------------------------------------------------------- requests
+
+    AuthenticateRequest:
+      type: object
+      required: [action, password]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: authenticate
+        password:
+          type: string
+          description: |
+            The password that is set in the app, the same one the web
+            interface uses.
+
+    StatusRequest:
+      type: object
+      required: [action]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: status
+
+    PingRequest:
+      type: object
+      required: [action]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: ping
+
+    ConversationsListRequest:
+      type: object
+      required: [action]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: conversations.list
+        limit:
+          $ref: '#/components/schemas/Limit'
+        cursor:
+          $ref: '#/components/schemas/Cursor'
+        q:
+          type: string
+          description: Search in text, numbers and contact names.
+        unread:
+          type: boolean
+          default: false
+          description: Only conversations with unread messages.
+        sim:
+          $ref: '#/components/schemas/SubscriptionId'
+
+    MessagesListRequest:
+      type: object
+      required: [action]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: messages.list
+        address:
+          type: string
+          description: |
+            Only messages from or to this number; see "Phone numbers" in
+            the description of this API.
+        conversationId:
+          type: integer
+          description: Only this conversation; wins if `address` is given too.
+        direction:
+          type: string
+          enum: [in, out, all]
+          default: all
+          description: Incoming, outgoing or both.
+        q:
+          type: string
+          description: Search in the message text.
+        from:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          description: Start of the time range, inclusive.
+        to:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          description: End of the time range, inclusive.
+        sim:
+          $ref: '#/components/schemas/SubscriptionId'
+        unread:
+          type: boolean
+          default: false
+          description: Only unread messages.
+        limit:
+          $ref: '#/components/schemas/Limit'
+        cursor:
+          $ref: '#/components/schemas/Cursor'
+
+    MessagesGetRequest:
+      type: object
+      required: [action, messageId]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: messages.get
+        messageId:
+          type: integer
+          description: '`id` of the message.'
+
+    MessagesSendRequest:
+      type: object
+      required: [action, to, body]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: messages.send
+        to:
+          type: string
+          description: |
+            Phone number. Spaces, dashes, dots, slashes and brackets are
+            ignored.
+          examples:
+            - '+4369912345678'
+        body:
+          type: string
+          description: |
+            Text, at most 10 SMS parts (1530 plain or 670 Unicode
+            characters).
+        sim:
+          allOf:
+            - $ref: '#/components/schemas/SubscriptionId'
+          description: Subscription id; default is the phone's SMS SIM.
+        requestId:
+          $ref: '#/components/schemas/SendRequestId'
+
+    SendRequestId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: '^[A-Za-z0-9._-]{1,64}$'
+      description: |
+        Your own id of a message to send. It is remembered for 30 days.
+        Sending the same `requestId` again does not send twice but
+        returns the first result with its current `status`, also when
+        that is `failed`. Using it again for another recipient or text is
+        answered with `invalid_request`.
+      examples:
+        - b0c1d2
+
+    MessagesStatusRequest:
+      type: object
+      required: [action, requestId]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: messages.status
+        requestId:
+          type: string
+          description: The `requestId` from `messages.send`.
+
+    MessagesDeleteRequest:
+      type: object
+      required: [action, messageId]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: messages.delete
+        messageId:
+          type: integer
+          description: '`id` of the message.'
+
+    ConversationsDeleteRequest:
+      type: object
+      required: [action, conversationId]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: conversations.delete
+        conversationId:
+          type: integer
+          description: '`id` of the conversation.'
+
+    ConversationsMarkReadRequest:
+      type: object
+      required: [action, conversationId]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: conversations.markRead
+        conversationId:
+          type: integer
+          description: '`id` of the conversation.'
+
+    ContactsListRequest:
+      type: object
+      required: [action]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: contacts.list
+        q:
+          type: string
+          description: Search in names and numbers.
+        limit:
+          $ref: '#/components/schemas/Limit'
+        cursor:
+          $ref: '#/components/schemas/Cursor'
+
+    SubscribeRequest:
+      type: object
+      required: [action, events]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: subscribe
+        events:
+          $ref: '#/components/schemas/EventSelection'
+        address:
+          type: [string, 'null']
+          description: |
+            Deliver `sms.*` events only for this number; see "Phone
+            numbers" in the description of this API. It replaces the
+            filter; without it, or with `null`, the filter is removed.
+
+    UnsubscribeRequest:
+      type: object
+      required: [action, events]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: unsubscribe
+        events:
+          $ref: '#/components/schemas/EventSelection'
+
+    EventSelection:
+      type: array
+      description: Event names, or `["*"]` for all.
+      items:
+        oneOf:
+          - $ref: '#/components/schemas/EventName'
+          - type: string
+            const: '*'
+      examples:
+        - [sms.received]
+        - ['*']
+
+    # ----------------------------------------------------------------- results
+
+    AuthenticateResult:
+      type: object
+      required: [protocolVersion, app, latestSeq, epoch]
+      properties:
+        protocolVersion:
+          type: integer
+          const: 1
+        app:
+          $ref: '#/components/schemas/AppInfo'
+        latestSeq:
+          type: integer
+          minimum: 0
+          description: Sequence number of the newest event so far.
+        epoch:
+          type: integer
+          format: int64
+          description: |
+            Identifies one run of the app. When it differs from the one
+            of the previous connection, the app was restarted and
+            sequence numbers began at 1 again.
+
+    AppInfo:
+      type: object
+      required: [name, version, protocolVersion]
+      properties:
+        name:
+          type: string
+          description: Name of the app.
+          examples:
+            - SMS Dock
+        version:
+          type: string
+          description: Version of the app.
+          examples:
+            - 1.0.0
+        protocolVersion:
+          type: integer
+          description: Protocol version of the server.
+
+    MarkReadResult:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          const: true
+
+    PingResult:
+      type: object
+      required: [time]
+      properties:
+        time:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          description: Time of the phone.
+
+    DeleteResult:
+      type: object
+      required: [deleted, mode]
+      properties:
+        deleted:
+          type: integer
+          minimum: 0
+          description: Number of deleted messages.
+        mode:
+          $ref: '#/components/schemas/DeleteMode'
+
+    Subscription:
+      type: object
+      description: The subscription in force.
+      required: [events, address]
+      properties:
+        events:
+          type: array
+          description: |
+            Names of the subscribed events, with `*` replaced by the names
+            it stands for.
+          items:
+            $ref: '#/components/schemas/EventName'
+        address:
+          type: [string, 'null']
+          description: |
+            Number that `sms.*` events are limited to, or `null` without a
+            limit.
+
+    Message:
+      type: object
+      description: One SMS.
+      required:
+        - id
+        - conversationId
+        - address
+        - contact
+        - direction
+        - body
+        - timestamp
+        - sentTimestamp
+        - read
+        - status
+        - sim
+        - requestId
+      properties:
+        id:
+          type: [integer, 'null']
+          description: |
+            Id on the phone. `null` only in an `sms.received` event whose
+            stored copy was not found in time.
+        conversationId:
+          type: [integer, 'null']
+          description: Id of the conversation.
+        address:
+          type: string
+          description: Peer number or sender name as stored.
+        contact:
+          type: [string, 'null']
+          description: Name from the phone's contacts.
+        direction:
+          $ref: '#/components/schemas/Direction'
+        body:
+          type: string
+          description: Text of the message.
+        timestamp:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          description: Receive time for incoming, send time for outgoing messages.
+        sentTimestamp:
+          type: [integer, 'null']
+          format: int64
+          description: Incoming only; time from the sender's network.
+        read:
+          type: boolean
+          description: Whether the message was read.
+        status:
+          type: string
+          enum: [received, queued, sending, sent, delivered, failed]
+          description: State of the message.
+        sim:
+          type: [integer, 'null']
+          description: Subscription id of the SIM.
+        requestId:
+          type: [string, 'null']
+          description: Set for messages sent through SMS Dock.
+
+    Conversation:
+      type: object
+      description: All messages exchanged with one phone number.
+      required:
+        - id
+        - address
+        - contact
+        - snippet
+        - timestamp
+        - direction
+        - messageCount
+        - unreadCount
+        - sim
+      properties:
+        id:
+          type: integer
+          description: Id of the conversation.
+        address:
+          type: string
+          description: Peer number or sender name as stored.
+        contact:
+          type: [string, 'null']
+          description: Name from the phone's contacts.
+        snippet:
+          type: string
+          maxLength: 160
+          description: Newest message, cut to 160 characters.
+        timestamp:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          description: Time of the newest message.
+        direction:
+          allOf:
+            - $ref: '#/components/schemas/Direction'
+          description: Direction of the newest message.
+        messageCount:
+          type: integer
+          minimum: 0
+          description: Number of messages.
+        unreadCount:
+          type: integer
+          minimum: 0
+          description: Number of unread messages.
+        sim:
+          type: [integer, 'null']
+          description: Subscription id of the SIM of the newest message.
+
+    Contact:
+      type: object
+      description: One contact of the phone.
+      required: [name, numbers]
+      properties:
+        name:
+          type: string
+          description: Display name.
+        numbers:
+          type: array
+          description: Phone numbers of the contact.
+          items:
+            $ref: '#/components/schemas/ContactNumber'
+
+    ContactNumber:
+      type: object
+      required: [number, label]
+      properties:
+        number:
+          type: string
+          description: Phone number as stored.
+        label:
+          type: [string, 'null']
+          description: Kind of number, for example `Mobile`.
+
+    Sim:
+      type: object
+      description: One SIM of the phone.
+      required: [subscriptionId, slot, name, number, isDefault]
+      properties:
+        subscriptionId:
+          type: integer
+          description: Id to use as `sim` in requests.
+        slot:
+          type: integer
+          description: Slot of the SIM, starting at 0.
+        name:
+          type: string
+          description: Name of the SIM or of the network.
+        number:
+          type: [string, 'null']
+          description: Phone number of the SIM if the phone knows it.
+        isDefault:
+          type: boolean
+          description: Whether this is the phone's SIM for SMS.
+
+    Status:
+      type: object
+      description: Phone, SIMs, permissions and limits.
+      required:
+        - app
+        - sims
+        - permissions
+        - defaultSmsApp
+        - deleteMode
+        - licence
+        - popup
+      properties:
+        app:
+          $ref: '#/components/schemas/AppInfo'
+        sims:
+          type: array
+          description: SIMs of the phone.
+          items:
+            $ref: '#/components/schemas/Sim'
+        permissions:
+          type: object
+          description: Android permissions; `true` when granted.
+          required:
+            - readSms
+            - sendSms
+            - receiveSms
+            - contacts
+            - phoneState
+            - notifications
+          properties:
+            readSms:
+              type: boolean
+            sendSms:
+              type: boolean
+            receiveSms:
+              type: boolean
+            contacts:
+              type: boolean
+            phoneState:
+              type: boolean
+            notifications:
+              type: boolean
+        defaultSmsApp:
+          type: boolean
+          description: Whether SMS Dock is the phone's default SMS app.
+        deleteMode:
+          allOf:
+            - $ref: '#/components/schemas/DeleteMode'
+          description: What a delete does at the moment.
+        licence:
+          type: object
+          required: [enforced, licensed, dailyLimit, sentToday, remaining]
+          properties:
+            enforced:
+              type: boolean
+              description: Whether the app enforces the licence.
+            licensed:
+              type: boolean
+              description: Whether the full licence was bought.
+            dailyLimit:
+              type: integer
+              description: SMS per day in the free version.
+            sentToday:
+              type: integer
+              description: SMS sent today.
+            remaining:
+              type: [integer, 'null']
+              description: |
+                SMS left today, or `null` when sending is unlimited.
+        popup:
+          type: boolean
+          description: Whether the web interface shows incoming SMS as a pop-up.
+
+    SendResult:
+      type: object
+      description: Result of `messages.send`.
+      required: [requestId, to, parts, status]
+      properties:
+        requestId:
+          type: string
+          description: Id of the message in the outbox; yours if you sent one.
+        to:
+          type: string
+          description: The number as it is sent, without the ignored characters.
+        parts:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Number of SMS parts.
+        status:
+          $ref: '#/components/schemas/OutboxStatus'
+
+    OutboxStatus:
+      type: string
+      enum: [queued, sending, sent, delivered, failed]
+      description: |
+        State of a message sent through SMS Dock: `queued` (handed to the
+        phone), `sending` (some parts left), `sent`, `delivered` or
+        `failed`.
+
+    Source:
+      type: string
+      enum: [web, api, app]
+      description: 'Who sent the message: `web`, `api` or `app`.'
+
+    OutboxEntry:
+      type: object
+      description: State of a message sent through SMS Dock.
+      required:
+        - requestId
+        - to
+        - parts
+        - partsSent
+        - status
+        - errorCode
+        - messageId
+        - sim
+        - source
+        - createdAt
+      properties:
+        requestId:
+          type: string
+          description: Id of the message in the outbox.
+        to:
+          type: string
+          description: Number of the recipient.
+        parts:
+          type: integer
+          description: Number of SMS parts.
+        partsSent:
+          type: integer
+          description: Parts the network accepted so far.
+        status:
+          $ref: '#/components/schemas/OutboxStatus'
+        errorCode:
+          type: [integer, 'null']
+          description: Result code of Android for a failed message.
+        messageId:
+          type: [integer, 'null']
+          description: Id of the stored message once it exists.
+        sim:
+          type: [integer, 'null']
+          description: Subscription id of the SIM.
+        source:
+          $ref: '#/components/schemas/Source'
+        createdAt:
+          allOf:
+            - $ref: '#/components/schemas/Timestamp'
+          description: Time the message was accepted.
+
+    Page:
+      type: object
+      description: |
+        A list is returned as a page. Pass `nextCursor` as `cursor` to get
+        the next page.
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          description: Items of this page.
+        nextCursor:
+          type: [string, 'null']
+          description: '`null` on the last page.'
+
+    MessagePage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Message'
+
+    ConversationPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Conversation'
+
+    ContactPage:
+      allOf:
+        - $ref: '#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Contact'
+
+    # ------------------------------------------------------------------ errors
+
+    Error:
+      type: object
+      description: Error of a request.
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - invalid_json
+            - invalid_request
+            - unknown_action
+            - not_authenticated
+            - invalid_password
+            - locked_out
+            - licence_required
+            - quota_exceeded
+            - rate_limited
+            - permission_missing
+            - invalid_number
+            - message_too_long
+            - sim_unavailable
+            - not_found
+            - not_default_app
+            - send_failed
+            - internal_error
+          description: See the table of error codes in the description of this API.
+        message:
+          type: string
+          description: Text for people, in English.
+        retryAfter:
+          type: integer
+          description: |
+            Seconds to wait. Present for `locked_out` and for
+            `rate_limited` because of too many requests per second.
+        permission:
+          type: string
+          description: '`permission_missing` only: the Android permission that is not granted.'
+
+    ErrorResponse:
+      type: object
+      required: [id, ok, error]
+      properties:
+        id:
+          $ref: '#/components/schemas/EchoedId'
+        ok:
+          type: boolean
+          const: false
+        error:
+          $ref: '#/components/schemas/Error'
+
+    # ------------------------------------------------------------- event data
+
+    SmsReceivedData:
+      type: object
+      required: [message]
+      properties:
+        message:
+          $ref: '#/components/schemas/Message'
+
+    SmsQueuedData:
+      type: object
+      required: [requestId, to, parts, sim, source]
+      properties:
+        requestId:
+          type: string
+          description: Id of the message in the outbox.
+        to:
+          type: string
+          description: Number of the recipient.
+        parts:
+          type: integer
+          description: Number of SMS parts.
+        sim:
+          type: [integer, 'null']
+          description: Subscription id of the SIM.
+        source:
+          $ref: '#/components/schemas/Source'
+
+    SmsSentData:
+      type: object
+      required: [requestId, conversationId, to, message]
+      properties:
+        requestId:
+          type: [string, 'null']
+          description: '`null` if another app sent the message.'
+        conversationId:
+          type: [integer, 'null']
+          description: |
+            Id of the conversation; `null` as long as the phone has not
+            stored the message.
+        to:
+          type: string
+          description: Number of the recipient.
+        message:
+          oneOf:
+            - $ref: '#/components/schemas/Message'
+            - type: 'null'
+          description: The stored message, or `null` if it was not found.
+
+    SmsDeliveredData:
+      type: object
+      required: [requestId, id, conversationId, to]
+      properties:
+        requestId:
+          type: [string, 'null']
+          description: Id of the message in the outbox.
+        id:
+          type: [integer, 'null']
+          description: |
+            Message id; `null` as long as the phone has not stored the
+            message.
+        conversationId:
+          type: [integer, 'null']
+          description: |
+            Id of the conversation; `null` as long as the phone has not
+            stored the message.
+        to:
+          type: string
+          description: Number of the recipient.
+
+    SmsFailedData:
+      type: object
+      required: [requestId, id, conversationId, to, errorCode, reason]
+      properties:
+        requestId:
+          type: [string, 'null']
+          description: Id of the message in the outbox.
+        id:
+          type: [integer, 'null']
+          description: |
+            Message id; `null` as long as the phone has not stored the
+            message.
+        conversationId:
+          type: [integer, 'null']
+          description: |
+            Id of the conversation; `null` as long as the phone has not
+            stored the message.
+        to:
+          type: string
+          description: Number of the recipient.
+        errorCode:
+          type: [integer, 'null']
+          description: Result code of Android.
+        reason:
+          type: [string, 'null']
+          description: |
+            Name of the result code: `generic_failure`, `radio_off`,
+            `null_pdu`, `no_service`, `limit_exceeded`,
+            `fdn_check_failure`, `short_code_not_allowed`,
+            `short_code_never_allowed`, or `error_N` for other codes.
+
+    SmsDeletedData:
+      type: object
+      required: [id, conversationId, address, mode]
+      properties:
+        id:
+          type: [integer, 'null']
+          description: Message id; `null` when a whole conversation was deleted.
+        conversationId:
+          type: [integer, 'null']
+          description: Id of the conversation.
+        address:
+          type: [string, 'null']
+          description: Peer number or sender name of the deleted messages.
+        mode:
+          $ref: '#/components/schemas/DeleteMode'
+
+    EmptyData:
+      type: object
+      description: No fields.

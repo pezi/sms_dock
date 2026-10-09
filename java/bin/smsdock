@@ -1,0 +1,9 @@
+#!/bin/sh
+# Runs the smsdock command-line tool from the jar built by "mvn package".
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+jar=${SMSDOCK_JAR:-"$here/../target/smsdock.jar"}
+if [ ! -f "$jar" ]; then
+    echo "smsdock: $jar not found. Run 'mvn -q package' in $(dirname -- "$here") first." >&2
+    exit 2
+fi
+exec java -jar "$jar" "$@"

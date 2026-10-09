@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Runs on the newest installed runtime when .NET 8 itself is missing. -->
+    <RollForward>Major</RollForward>
+    <RootNamespace>SmsDock.Cli</RootNamespace>
+    <!-- Not "smsdock": next to SmsDock.dll that name is the same file on macOS and Windows. -->
+    <AssemblyName>SmsDock.Cli</AssemblyName>
+    <PackageId>SmsDock.Cli</PackageId>
+    <Description>Command-line tool smsdock for the WebSocket API of the SMS Dock app.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>smsdock</ToolCommandName>
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../SmsDock/SmsDock.csproj" />
+    <InternalsVisibleTo Include="SmsDock.Tests" />
+  </ItemGroup>
+
+</Project>

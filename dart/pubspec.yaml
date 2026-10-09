@@ -1,0 +1,19 @@
+name: smsdock
+description: >-
+  Client library and command-line tool for the WebSocket API of the
+  SMS Dock app (protocol version 1).
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+executables:
+  smsdock:
+
+dependencies:
+  crypto: ^3.0.3
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0

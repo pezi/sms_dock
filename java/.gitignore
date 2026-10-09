@@ -1,0 +1,40 @@
+# Maven build output
+target/
+dependency-reduced-pom.xml
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+release.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Compiled classes and logs
+*.class
+*.log
+hs_err_pid*
+replay_pid*
+
+# Editors / IDEs
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+bin/*.class
+
+# OS files
+.DS_Store
+
+# Local environment: passwords and fingerprints stay out of git
+.env
+.env.*
+!.env.example
+
+# Certificates and keys made for tests
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
