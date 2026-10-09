@@ -1,0 +1,97 @@
+# Python: byte code
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python: packaging
+build/
+dist/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+
+# Python: virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python: tools
+pip-log.txt
+pip-delete-this-directory.txt
+.python-version
+uv.lock
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Java: Maven; Rust: Cargo
+target/
+*.class
+dependency-reduced-pom.xml
+
+# Node.js
+node_modules/
+npm-debug.log*
+*.tgz
+
+# Dart
+.dart_tool/
+
+# C# / .NET: build output (csharp/bin/ holds the launcher script and is kept)
+obj/
+csharp/src/*/bin/
+csharp/examples/*/bin/
+csharp/tests/*/bin/
+TestResults/
+*.nupkg
+
+# Go
+*.test
+*.out
+go.work
+go.work.sum
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# Local environment / secrets: passwords and fingerprints stay out of git
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+*.jks
+*.crt
+*.pem
+
+# The public GitHub checkout that sync_github.sh fills
+github/
