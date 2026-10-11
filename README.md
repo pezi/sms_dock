@@ -2,6 +2,10 @@
 
 ![SMS Dock](images/intro.webp "SMS Dock")
 
+## App Stores
+
+[Google Play Store](https://play.google.com/store/apps/details?id=app.flutterdev.smscenter)
+
 SMS Dock is an Android app that turns a phone into an SMS hub. The phone
 keeps its SIM and its number; programs and browsers in the same network use
 it to read, send and delete SMS and to react to incoming ones.
