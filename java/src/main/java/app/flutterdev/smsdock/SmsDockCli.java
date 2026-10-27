@@ -295,6 +295,8 @@ public final class SmsDockCli {
                     return messages(client, values);
                 case "send":
                     return send(client, values);
+                case "send-group":
+                    return sendGroup(client, values);
                 case "delete":
                     return delete(client, values);
                 case "mark-read":
@@ -354,6 +356,19 @@ public final class SmsDockCli {
                 "your own id; the same id is sent only once"))
             .add(new Option("--wait", Kind.FLAG, null,
                 "wait until the message was sent or failed"))
+            .add(new Option("--wait-timeout", Kind.NUMBER, "SECONDS",
+                "longest time to wait with --wait (default: 60)")));
+        commands.add(connected("send-group", "send one text to several numbers, one SMS each",
+            "Send the same text to several numbers as separate SMS. Without --text the text "
+                + "is read from standard input.")
+            .add(new Option("--to", Kind.MANY, "NUMBER",
+                "phone numbers of the recipients (at most 20)").required())
+            .add(new Option("--text", Kind.TEXT, null, "text of the message"))
+            .add(new Option("--sim", Kind.INTEGER, "ID", "subscription id of the SIM"))
+            .add(new Option("--request-id", Kind.TEXT, "ID",
+                "your own id of the group; the same id is sent only once"))
+            .add(new Option("--wait", Kind.FLAG, null,
+                "wait until every message was sent or failed"))
             .add(new Option("--wait-timeout", Kind.NUMBER, "SECONDS",
                 "longest time to wait with --wait (default: 60)")));
         commands.add(connected("delete", "delete a message or a conversation", null)
@@ -844,7 +859,8 @@ public final class SmsDockCli {
         return EXIT_OK;
     }
 
-    private int send(SmsDockClient client, Map<String, Object> args) {
+    /** Returns the text to send: {@code --text} or standard input. */
+    private String textOf(Map<String, Object> args) {
         String text = (String) args.get("text");
         if (text == null) {
             if (passwordPrompt != null) {
@@ -858,6 +874,11 @@ public final class SmsDockCli {
         if (text.isEmpty()) {
             throw new UsageError("The text is empty.");
         }
+        return text;
+    }
+
+    private int send(SmsDockClient client, Map<String, Object> args) {
+        String text = textOf(args);
         Map<String, Object> result = client.send(
             (String) args.get("to"), text, (Long) args.get("sim"),
             (String) args.get("request-id"));
@@ -881,6 +902,59 @@ public final class SmsDockCli {
                 + text(result.get("requestId")));
         }
         return failed ? EXIT_API_ERROR : EXIT_OK;
+    }
+
+    private int sendGroup(SmsDockClient client, Map<String, Object> args) {
+        String text = textOf(args);
+        List<String> numbers = new ArrayList<>();
+        ((List<?>) args.get("to")).forEach(number -> numbers.add(String.valueOf(number)));
+        Map<String, Object> result = new LinkedHashMap<>(client.sendGroup(
+            numbers, text, (Long) args.get("sim"), (String) args.get("request-id")));
+        List<Map<String, Object>> members = new ArrayList<>();
+        for (Object member : (List<?>) result.get("messages")) {
+            members.add(new LinkedHashMap<>(castObject(member)));
+        }
+        if (flag(args, "wait")) {
+            long deadline = System.nanoTime()
+                + seconds((Double) args.getOrDefault("wait-timeout", 60.0)).toNanos();
+            for (int index = 0; index < members.size(); index++) {
+                Map<String, Object> member = members.get(index);
+                if ("failed".equals(member.get("status"))) {
+                    continue;
+                }
+                members.set(index, client.waitForResult((String) member.get("requestId"),
+                    Duration.ofNanos(Math.max(0L, deadline - System.nanoTime()))));
+            }
+            result.put("messages", members);
+        }
+        long failed = members.stream().filter(m -> "failed".equals(m.get("status"))).count();
+        if (flag(args, "json")) {
+            out.println(Json.pretty(result));
+            return failed > 0 ? EXIT_API_ERROR : EXIT_OK;
+        }
+        out.println("Group " + text(result.get("requestId")) + ": " + members.size()
+            + " recipient(s), " + text(result.get("parts")) + " part(s) each");
+        for (Map<String, Object> member : members) {
+            if ("failed".equals(member.get("status"))) {
+                Object code = member.get("errorCode");
+                String cause = code == null ? "" : ", error code " + text(code);
+                out.println("  Failed: " + text(member.get("to")) + cause + ", requestId "
+                    + text(member.get("requestId")));
+            } else {
+                out.println("  " + capitalize(text(member.get("status"))) + ": "
+                    + text(member.get("to")) + ", requestId " + text(member.get("requestId")));
+            }
+        }
+        if (failed > 0) {
+            err.println("smsdock: " + failed + " of " + members.size() + " message(s) failed");
+        }
+        return failed > 0 ? EXIT_API_ERROR : EXIT_OK;
+    }
+
+    /** Casts a parsed JSON object; the parser only produces string-keyed maps. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castObject(Object value) {
+        return (Map<String, Object>) value;
     }
 
     private int delete(SmsDockClient client, Map<String, Object> args) {

@@ -18,6 +18,9 @@ public static class SmsDockApi
     /// <summary>Largest value of <c>limit</c>.</summary>
     public const int MaxPageSize = 200;
 
+    /// <summary>Recipients of one group message at most.</summary>
+    public const int MaxGroupRecipients = 20;
+
     /// <summary>Environment variable that holds the password.</summary>
     public const string PasswordEnv = "SMSDOCK_PASSWORD";
 

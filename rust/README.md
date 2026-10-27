@@ -230,6 +230,30 @@ for example `Sent: …`. If the first message failed, the second run fails
 too (exit code 1); use a new id to try again. The same id with another
 number or text is an error (`invalid_request`).
 
+### send-group
+
+```bash
+smsdock send-group wss://192.168.1.50:9443/ws \
+  --to +4369912345678 --to +436641112223 --text 'Meeting at 10.'
+```
+
+```
+Group 3f9c…: 2 recipient(s), 1 part(s) each
+  Queued: +4369912345678, requestId 3f9c….1
+  Queued: +436641112223, requestId 3f9c….2
+```
+
+The same text goes to every number as a separate SMS; nobody sees the
+other recipients. The options are those of `send`, with `--to` repeated
+for every recipient (at most 20). The phone checks the whole group before
+it sends anything: a bad number, a text that is too long, fewer messages
+left in the daily limit than recipients, or more than 20 SMS parts in
+total (parts × recipients) refuse the group. A recipient the phone
+refuses afterwards is printed as `Failed`; the others are sent. With
+`--wait` the command waits for every message and ends with exit code 1
+if any of them failed. `--request-id` names the group; the members get
+the ids `ID.1`, `ID.2` and so on, which `--json` prints.
+
 ### delete
 
 ```bash
@@ -387,6 +411,7 @@ those of [../API.md](../API.md#objects) in snake case, for example
 | `iter_messages(&filter, page_size, max_items)` | Iterator of `Result<Message>`; same filters as `messages` |
 | `get_message(message_id)` | `Message` |
 | `send(to, body, sim, request_id)` | `SendResult` |
+| `send_group(to, body, sim, request_id)` | `GroupSendResult`: one SMS per number in the slice `to`, at most 20 |
 | `message_status(request_id)` | `OutboxEntry` |
 | `wait_for_result(request_id, timeout)` | `OutboxEntry` with the status `sent`, `delivered` or `failed` |
 | `wait_for_result_with(request_id, &WaitOptions { timeout, delivered, poll_interval })` | The same, with more options |
@@ -487,6 +512,35 @@ stands for one message: using it for another recipient or text is an
 
 The status of a message is `queued` (handed to the phone), `sending`
 (some parts are left), `sent`, `delivered` or `failed`.
+
+### One text to several numbers
+
+`send_group()` sends the same text to every number of a slice as separate
+SMS. The result names the group and holds one `SendResult` per recipient;
+their request ids are `<request_id>.1`, `<request_id>.2` and so on, and
+`wait_for_result()` and `message_status()` take them like those of single
+messages.
+
+```rust
+let result = dock.send_group(
+    &["+4369912345678", "+436641112223"], "Meeting at 10.", None, Some("meeting-1"),
+)?;
+for member in &result.messages {
+    if member.status == "failed" {          // the phone refused this one at once
+        println!("{} refused", member.to);
+        continue;
+    }
+    let outcome = dock.wait_for_result(&member.request_id, Some(Duration::from_secs(60)))?;
+    println!("{} {}", member.to, outcome.status);
+}
+```
+
+The phone checks the whole group before the first SMS leaves: a number
+that is not a phone number, a text that is too long, fewer messages left
+in the daily limit of the free version than the group has recipients, or
+more SMS parts than the 20 of one minute (parts × recipients) return
+`Error::Api` and nothing is sent. A `request_id` of a group has at most 61
+characters and makes the group safe to repeat, as for `send()`.
 
 ### Events and hooks
 
@@ -723,7 +777,7 @@ match hello() {
 
 ## Examples
 
-The directory [examples/](examples) contains four short programs. Each
+The directory [examples/](examples) contains five short programs. Each
 takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 `SMSDOCK_FINGERPRINT`.
 
@@ -731,12 +785,14 @@ takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 | --- | --- |
 | [list_messages.rs](examples/list_messages.rs) | The last 10 incoming SMS |
 | [send_sms.rs](examples/send_sms.rs) | Send one SMS and wait for the result |
+| [send_group_sms.rs](examples/send_group_sms.rs) | Send one text to several numbers, one SMS each, and wait for every result |
 | [listen_incoming.rs](examples/listen_incoming.rs) | Hook: call a function for every incoming SMS, also for those that arrived while the connection was down |
 | [auto_reply.rs](examples/auto_reply.rs) | Hook that answers incoming SMS, with guards against reply loops |
 
 ```bash
 cargo run --example list_messages -- wss://192.168.1.50:9443/ws
 cargo run --example send_sms -- wss://192.168.1.50:9443/ws +4369912345678 'Hello'
+cargo run --example send_group_sms -- wss://192.168.1.50:9443/ws 'Hello all' +4369912345678 +436641112223
 cargo run --example listen_incoming -- wss://192.168.1.50:9443/ws
 cargo run --example auto_reply -- wss://192.168.1.50:9443/ws
 ```

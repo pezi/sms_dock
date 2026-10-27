@@ -340,6 +340,58 @@ public sealed class SendResult : JsonModel
     public string Status => Text("status") ?? "";
 }
 
+/// <summary>Result of <c>messages.sendGroup</c>: one SMS per recipient.</summary>
+public sealed class GroupSendResult : JsonModel
+{
+    /// <summary>Creates a view of a GroupSendResult object.</summary>
+    /// <param name="json">The object as the server sent it.</param>
+    public GroupSendResult(JsonObject json)
+        : base(json)
+    {
+    }
+
+    /// <summary>
+    /// The id of the group, yours or the one the client created. The members have the ids
+    /// <c>requestId.1</c>, <c>requestId.2</c> and so on.
+    /// </summary>
+    public string RequestId => Text("requestId") ?? "";
+
+    /// <summary>The numbers as they are sent, in the order of <see cref="Messages"/>.</summary>
+    public IReadOnlyList<string> To
+    {
+        get
+        {
+            var numbers = new List<string>();
+            if (Json["to"] is JsonArray array)
+            {
+                foreach (var item in array)
+                {
+                    if (PyText.AsString(item) is { } number)
+                    {
+                        numbers.Add(number);
+                    }
+                }
+            }
+            return numbers;
+        }
+    }
+
+    /// <summary>Number of SMS parts of the text, the same for every recipient.</summary>
+    public long Parts => Integer("parts") ?? 0;
+
+    /// <summary>
+    /// The least advanced status of the members (<c>queued</c>, <c>sending</c>, <c>sent</c>,
+    /// <c>delivered</c>), or <c>failed</c> when every member failed.
+    /// </summary>
+    public string Status => Text("status") ?? "";
+
+    /// <summary>One <see cref="SendResult"/> per recipient.</summary>
+    public IReadOnlyList<SendResult> Messages => Objects("messages", json => new SendResult(json));
+
+    /// <summary>Number of recipients the phone refused at once.</summary>
+    public int FailedCount => Messages.Count(member => member.Status == "failed");
+}
+
 /// <summary>State of a message sent through SMS Dock.</summary>
 public sealed class OutboxEntry : JsonModel
 {

@@ -747,6 +747,105 @@ def test_request_id_of_another_message(
     assert len(server.sent) == 1
 
 
+def test_send_group(server: FakeSmsDock, client: SmsDockClient) -> None:
+    result = client.send_group(
+        ["+43 690 876-54321", ANNA, BEN], "Hello all", sim=2, request_id="news-1"
+    )
+    assert result["requestId"] == "news-1"
+    assert result["to"] == [BEN, ANNA]
+    assert result["parts"] == 1
+    assert result["status"] == "queued"
+    assert result["messages"] == [
+        {"requestId": "news-1.1", "to": BEN, "parts": 1, "status": "queued"},
+        {"requestId": "news-1.2", "to": ANNA, "parts": 1, "status": "queued"},
+    ]
+    assert last_request(server, "messages.sendGroup") == {
+        "id": "py-2", "action": "messages.sendGroup",
+        "to": ["+43 690 876-54321", ANNA, BEN], "body": "Hello all",
+        "sim": 2, "requestId": "news-1",
+    }
+    assert [(m["requestId"], m["to"], m["sim"], m["group"]) for m in server.sent] == [
+        ("news-1.1", BEN, 2, "news-1"), ("news-1.2", ANNA, 2, "news-1"),
+    ]
+    assert client.wait_for_result("news-1.2", 5)["status"] == "sent"
+    assert client.message_status("news-1.1")["to"] == BEN
+    with pytest.raises(ApiError) as raised:
+        client.message_status("news-1")
+    assert raised.value.code == "not_found"
+
+
+def test_send_group_creates_a_request_id(
+    server: FakeSmsDock, client: SmsDockClient
+) -> None:
+    result = client.send_group([BEN], "one")
+    request_id = result["requestId"]
+    assert len(request_id) == 32 and int(request_id, 16) >= 0
+    assert result["messages"][0]["requestId"] == request_id + ".1"
+
+
+def test_send_group_repeats_only_once(
+    server: FakeSmsDock, client: SmsDockClient
+) -> None:
+    first = client.send_group([BEN, ANNA], "Same", request_id="news-2")
+    again = client.send_group(["0690/876.54.321", ANNA], "Same", request_id="news-2")
+    assert again == first
+    assert len(server.sent) == 2
+    assert client.wait_for_result("news-2.1", 5)["status"] == "sent"
+    later = client.send_group([ANNA, BEN], "Same", request_id="news-2")
+    assert later["messages"][0]["status"] in ("sent", "delivered")
+    assert later["status"] in ("queued", "sent", "delivered")
+    assert [m["requestId"] for m in later["messages"]] == ["news-2.1", "news-2.2"]
+    for to, body in ([BEN, ANNA], "Other"), ([BEN], "Same"):
+        with pytest.raises(ApiError) as raised:
+            client.send_group(to, body, request_id="news-2")
+        assert raised.value.code == "invalid_request"
+    assert len(server.sent) == 2
+
+
+def test_send_group_refuses_the_whole_group(
+    server: FakeSmsDock, client: SmsDockClient
+) -> None:
+    for to, body, code in [
+        ([BEN, "abc"], "Hello", "invalid_number"),
+        ([BEN, ANNA], "x" * 1531, "message_too_long"),
+        ([BEN, ANNA, "+43123456789"], "x" * 1000, "invalid_request"),
+    ]:
+        with pytest.raises(ApiError) as raised:
+            client.send_group(to, body)
+        assert raised.value.code == code
+    assert server.sent == []
+
+
+def test_send_group_goes_on_after_a_refused_member(
+    server: FakeSmsDock, client: SmsDockClient
+) -> None:
+    server.refuse_numbers.add(ANNA)
+    result = client.send_group([BEN, ANNA], "Hello", request_id="news-3")
+    assert [m["status"] for m in result["messages"]] == ["queued", "failed"]
+    assert result["status"] == "queued"
+    assert client.wait_for_result("news-3.1", 5)["status"] == "sent"
+    assert client.message_status("news-3.2")["status"] == "failed"
+    server.refuse_numbers.add(BEN)
+    assert client.send_group([BEN, ANNA], "Hello", request_id="news-4")["status"] == "failed"
+
+
+@pytest.mark.parametrize("to, body, request_id", [
+    ("+43123", "Hello", None),
+    ([], "Hello", None),
+    ([BEN, ""], "Hello", None),
+    ([BEN, 5], "Hello", None),
+    ([BEN], "", None),
+    ([BEN], "Hello", "x" * 62),
+    ([BEN], "Hello", "has space"),
+    ([f"+4369900000{i:02d}" for i in range(21)], "Hello", None),
+])
+def test_send_group_refuses_bad_values(
+    client: SmsDockClient, to: Any, body: str, request_id: str | None
+) -> None:
+    with pytest.raises(ValueError):
+        client.send_group(to, body, request_id=request_id)
+
+
 def test_repeat_after_a_failure_does_not_send_again(
     server: FakeSmsDock, client: SmsDockClient
 ) -> None:

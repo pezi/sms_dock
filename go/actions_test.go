@@ -2,6 +2,7 @@ package smsdock
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -320,6 +321,123 @@ func TestSendWithOwnRequestIDAndSim(t *testing.T) {
 	_, err = client.Send(ctx, anna, "Grüße", options)
 	wantAPIError(t, err, "invalid_request")
 	equal(t, len(server.Sent()), 1)
+}
+
+func TestSendGroup(t *testing.T) {
+	server, client := setup(t)
+	options := &SendOptions{Sim: Ptr(2), RequestID: "news-1"}
+	result := must(client.SendGroup(
+		ctx, []string{"+43 690 876-54-321", anna, ben}, "Hello all", options))(t)
+	equal(t, result.RequestID, "news-1")
+	equalLists(t, result.To, []string{ben, anna})
+	equal(t, result.Parts, 1)
+	equal(t, result.Status, "queued")
+	equal(t, len(result.Messages), 2)
+	equal(t, result.Messages[0].RequestID, "news-1.1")
+	equal(t, result.Messages[0].To, ben)
+	equal(t, result.Messages[1].RequestID, "news-1.2")
+	equal(t, result.Messages[1].To, anna)
+	equal(t, result.Messages[1].Status, "queued")
+	equal(t, string(result.Messages[1].Raw) != "", true)
+	equal(t, len(result.Failed()), 0)
+	sent := server.Sent()
+	equal(t, len(sent), 2)
+	equal(t, sent[0], fakeserver.SentMessage{
+		RequestID: "news-1.1", To: ben, Body: "Hello all", Sim: 2, Group: "news-1",
+	})
+	equal(t, sent[1].RequestID, "news-1.2")
+	request := server.RequestsOf("messages.sendGroup")[0]
+	equal(t, request["requestId"], any("news-1"))
+	equal(t, request["sim"], any(2.0))
+	equal(t, len(request["to"].([]any)), 3)
+	entry := must(client.WaitForResult(ctx, "news-1.2", nil))(t)
+	equal(t, entry.Status, "sent")
+	equal(t, must(client.MessageStatus(ctx, "news-1.1"))(t).To, ben)
+	_, err := client.MessageStatus(ctx, "news-1")
+	wantAPIError(t, err, "not_found")
+
+	// A random id without one; the members derive from it.
+	random := must(client.SendGroup(ctx, []string{ben}, "one", nil))(t)
+	equal(t, len(random.RequestID), 32)
+	equal(t, random.Messages[0].RequestID, random.RequestID+".1")
+}
+
+func TestSendGroupRepeatsOnlyOnce(t *testing.T) {
+	server, client := setup(t)
+	options := &SendOptions{RequestID: "news-2"}
+	first := must(client.SendGroup(ctx, []string{ben, anna}, "Same", options))(t)
+	again := must(client.SendGroup(
+		ctx, []string{"0690 876 54 321", anna}, "Same", options))(t)
+	equal(t, again.RequestID, first.RequestID)
+	equalLists(t, again.To, first.To)
+	equal(t, len(server.Sent()), 2)
+	must(client.WaitForResult(ctx, "news-2.1", nil))(t)
+	later := must(client.SendGroup(ctx, []string{anna, ben}, "Same", options))(t)
+	equal(t, later.Messages[0].Status == "sent" || later.Messages[0].Status == "delivered", true)
+	for _, wrong := range []struct {
+		to   []string
+		body string
+	}{{[]string{ben, anna}, "Other"}, {[]string{ben}, "Same"}} {
+		_, err := client.SendGroup(ctx, wrong.to, wrong.body, options)
+		wantAPIError(t, err, "invalid_request")
+	}
+	equal(t, len(server.Sent()), 2)
+}
+
+func TestSendGroupRefusesTheWholeGroup(t *testing.T) {
+	server, client := setup(t)
+	_, err := client.SendGroup(ctx, []string{ben, "abc"}, "Hello", nil)
+	wantAPIError(t, err, "invalid_number")
+	_, err = client.SendGroup(ctx, []string{ben, anna}, strings.Repeat("x", 1531), nil)
+	wantAPIError(t, err, "message_too_long")
+	_, err = client.SendGroup(
+		ctx, []string{ben, anna, "+43123456789"}, strings.Repeat("x", 1000), nil)
+	wantAPIError(t, err, "invalid_request")
+	_, err = client.SendGroup(ctx, []string{ben}, "Hello", &SendOptions{Sim: Ptr(9)})
+	wantAPIError(t, err, "sim_unavailable")
+	equal(t, len(server.Sent()), 0)
+}
+
+func TestSendGroupGoesOnAfterARefusedMember(t *testing.T) {
+	server, client := setup(t)
+	server.RefuseNumbers(anna)
+	options := &SendOptions{RequestID: "news-3"}
+	result := must(client.SendGroup(ctx, []string{ben, anna}, "Hello", options))(t)
+	equal(t, result.Status, "queued")
+	equal(t, result.Messages[0].Status, "queued")
+	equal(t, result.Messages[1].Status, "failed")
+	equal(t, len(result.Failed()), 1)
+	equal(t, result.Failed()[0].To, anna)
+	equal(t, must(client.WaitForResult(ctx, "news-3.1", nil))(t).Status, "sent")
+	equal(t, must(client.MessageStatus(ctx, "news-3.2"))(t).Status, "failed")
+	server.RefuseNumbers(ben, anna)
+	all := must(client.SendGroup(
+		ctx, []string{ben, anna}, "Hello", &SendOptions{RequestID: "news-4"}))(t)
+	equal(t, all.Status, "failed")
+}
+
+func TestSendGroupRefusesWrongArguments(t *testing.T) {
+	server, client := setup(t)
+	var many []string
+	for index := 0; index < 21; index++ {
+		many = append(many, fmt.Sprintf("+4369900000%02d", index))
+	}
+	for _, wrong := range []struct {
+		to   []string
+		body string
+	}{
+		{nil, "text"}, {[]string{}, "text"}, {[]string{ben, " "}, "text"},
+		{[]string{ben}, ""}, {many, "text"},
+	} {
+		_, err := client.SendGroup(ctx, wrong.to, wrong.body, nil)
+		wantArgumentError(t, err)
+	}
+	for _, id := range []string{"with space", strings.Repeat("x", 62)} {
+		_, err := client.SendGroup(ctx, []string{ben}, "text", &SendOptions{RequestID: id})
+		wantArgumentError(t, err)
+	}
+	equalLists(t, server.Actions(), []string{"authenticate"})
+	equal(t, len(server.Sent()), 0)
 }
 
 func TestRepeatAfterAFailureDoesNotSendAgain(t *testing.T) {

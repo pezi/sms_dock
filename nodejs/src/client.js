@@ -85,6 +85,10 @@ const MESSAGE_FILTERS = [
   'unread',
 ];
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const GROUP_REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,61}$/;
+
+/** Recipients of one group message at most. */
+export const MAX_GROUP_RECIPIENTS = 20;
 const DIRECTIONS = ['in', 'out', 'all'];
 const OUTCOME_EVENTS = ['sms.sent', 'sms.delivered', 'sms.failed'];
 const MAX_BACKOFF_EXPONENT = 16;
@@ -679,6 +683,62 @@ export class SmsDockClient {
       fields.sim = integer(options.sim, 'sim');
     }
     return this.request('messages.send', fields);
+  }
+
+  /**
+   * Sends one text to several numbers, one SMS each, and returns the
+   * GroupSendResult.
+   *
+   * `to` holds 1 to 20 phone numbers; repeated numbers are sent once.
+   * Every recipient gets a separate SMS and does not see the others. The
+   * result holds one SendResult per recipient in `messages`; their request
+   * ids are `<requestId>.1`, `<requestId>.2` and so on, and
+   * `waitForResult()` and `messageStatus()` take them like those of
+   * single messages.
+   *
+   * The phone checks the whole group before it sends anything: a number
+   * that is not a phone number (`invalid_number`), a text that is too
+   * long, fewer messages left in the daily limit of the free version than
+   * the group has recipients (`quota_exceeded`) or more SMS parts than the
+   * 20 of one minute, parts times recipients (`invalid_request`), refuse
+   * the whole group. A refusal by the phone for one recipient does not
+   * stop the others; that member has the status `failed` in `messages`.
+   *
+   * `requestId` has at most 61 characters here, so that the member suffix
+   * fits, and works as for `send()`: the same id with the same text and
+   * numbers is not sent again but answered with the stored members and
+   * their current status.
+   *
+   * @param {string[]} to
+   * @param {string} body
+   * @param {{sim?: number, requestId?: string}} [options]
+   * @returns {Promise<import('../index.d.ts').GroupSendResult>}
+   */
+  async sendGroup(to, body, options = {}) {
+    checkOptions(options, ['sim', 'requestId']);
+    const numbers = Array.isArray(to) && to.every((n) => typeof n === 'string' && n.trim());
+    if (!numbers || to.length === 0) {
+      throw new RangeError("'to' must be a list of phone numbers");
+    }
+    if (to.length > MAX_GROUP_RECIPIENTS) {
+      throw new RangeError(`'to' holds more than ${MAX_GROUP_RECIPIENTS} numbers`);
+    }
+    if (typeof body !== 'string' || !body) {
+      throw new RangeError("'body' must be a text");
+    }
+    let { requestId } = options;
+    if (requestId === undefined || requestId === null) {
+      requestId = randomUUID().replaceAll('-', '');
+    } else if (typeof requestId !== 'string' || !GROUP_REQUEST_ID_PATTERN.test(requestId)) {
+      throw new RangeError(
+        'requestId of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -',
+      );
+    }
+    const fields = { to: [...to], body, requestId };
+    if (options.sim !== undefined && options.sim !== null) {
+      fields.sim = integer(options.sim, 'sim');
+    }
+    return this.request('messages.sendGroup', fields);
   }
 
   /**

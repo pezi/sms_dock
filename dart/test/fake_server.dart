@@ -252,6 +252,9 @@ class FakeSmsDock {
   final Map<String, JsonObject> outbox = {};
   final Set<String> failNumbers = {};
 
+  /// Numbers the phone refuses at once (`send_refused`).
+  final Set<String> refuseNumbers = {};
+
   /// Messages handed to the (imaginary) radio, one entry per SMS.
   final List<JsonObject> sent = [];
 
@@ -294,11 +297,7 @@ class FakeSmsDock {
 
   /// Starts the server.
   Future<FakeSmsDock> start() async {
-    final server = await HttpServer.bindSecure(
-      host,
-      port,
-      tls.serverContext(),
-    );
+    final server = await HttpServer.bindSecure(host, port, tls.serverContext());
     _server = server;
     port = server.port;
     server.listen(
@@ -769,6 +768,7 @@ class FakeSmsDock {
       'conversations.markRead' => _conversationsMarkRead(request),
       'contacts.list' => _contactsList(request),
       'messages.send' => _messagesSend(request),
+      'messages.sendGroup' => _messagesSendGroup(request),
       'subscribe' => _subscribe(client, request),
       'unsubscribe' => _unsubscribe(client, request),
       _ => throw Failure('unknown_action', "Unknown action '$action'."),
@@ -814,7 +814,7 @@ class FakeSmsDock {
       'app': {
         'name': 'SMS Dock',
         'version': '1.0.0',
-        'protocolVersion': protocol
+        'protocolVersion': protocol,
       },
       'latestSeq': _sequence,
       'epoch': epoch,
@@ -825,7 +825,7 @@ class FakeSmsDock {
         'app': {
           'name': 'SMS Dock',
           'version': '1.0.0',
-          'protocolVersion': protocol
+          'protocolVersion': protocol,
         },
         'sims': sims,
         'permissions': {
@@ -1063,16 +1063,38 @@ class FakeSmsDock {
         'status': known['status'],
       };
     }
+    final subscription = _simFor(sim);
+    requestId ??= _randomRequestId();
+    final entry = _queue(requestId, number, body, parts, subscription);
+    return _sendResult(entry);
+  }
+
+  /// Returns the SIM to send with; the default one without [sim].
+  int _simFor(int? sim) {
     if (sim == null) {
-      sim = sims.firstWhere((s) => s['isDefault'] == true)['subscriptionId']
+      return sims.firstWhere((s) => s['isDefault'] == true)['subscriptionId']
           as int;
-    } else if (sims.every((s) => s['subscriptionId'] != sim)) {
+    }
+    if (sims.every((s) => s['subscriptionId'] != sim)) {
       throw Failure('sim_unavailable', 'No SIM with the subscription id $sim.');
     }
-    requestId ??= [
-      for (var index = 0; index < 16; index += 1)
-        _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
-    ].join();
+    return sim;
+  }
+
+  String _randomRequestId() => [
+        for (var index = 0; index < 16; index += 1)
+          _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+      ].join();
+
+  /// Queues one message that passed the checks and starts sending it.
+  JsonObject _queue(
+    String requestId,
+    String number,
+    String body,
+    int parts,
+    int sim, {
+    String? group,
+  }) {
     final entry = <String, dynamic>{
       'requestId': requestId,
       'to': number,
@@ -1087,7 +1109,13 @@ class FakeSmsDock {
     };
     outbox[requestId] = entry;
     _bodies[requestId] = body;
-    sent.add({'requestId': requestId, 'to': number, 'body': body, 'sim': sim});
+    sent.add({
+      'requestId': requestId,
+      'to': number,
+      'body': body,
+      'sim': sim,
+      if (group != null) 'group': group,
+    });
     emit('sms.queued', {
       'requestId': requestId,
       'to': number,
@@ -1095,13 +1123,117 @@ class FakeSmsDock {
       'sim': sim,
       'source': 'api',
     });
+    if (refuseNumbers.contains(number)) {
+      // The phone did not even take the message.
+      entry['status'] = 'failed';
+      emit('sms.failed', {
+        'requestId': requestId,
+        'id': null,
+        'conversationId': null,
+        'to': number,
+        'errorCode': null,
+        'reason': 'send_refused',
+      });
+      return entry;
+    }
     unawaited(_transmit(entry, body));
-    return {
-      'requestId': requestId,
-      'to': number,
-      'parts': parts,
-      'status': 'queued',
-    };
+    return entry;
+  }
+
+  JsonObject _messagesSendGroup(JsonObject request) {
+    final to = _required<List<dynamic>>(request, 'to');
+    final body = _required<String>(request, 'body');
+    final sim = _optional<int>(request, 'sim');
+    var requestId = _optional<String>(request, 'requestId');
+    if (to.isEmpty) {
+      throw Failure('invalid_request', "'to' is missing.");
+    }
+    if (to.any((item) => item is! String)) {
+      throw Failure('invalid_request', "'to' must contain strings.");
+    }
+    final numbers = <String>[];
+    for (final item in to.cast<String>()) {
+      final number = normalizeNumber(item);
+      if (!_number.hasMatch(number)) {
+        throw Failure(
+          'invalid_number',
+          "'to' contains '$item', which is not a phone number.",
+        );
+      }
+      if (!numbers.any((known) => samePeer(known, number))) {
+        numbers.add(number);
+      }
+    }
+    if (numbers.length > 20) {
+      throw Failure(
+        'invalid_request',
+        'A group message goes to at most 20 recipients.',
+      );
+    }
+    if (body.isEmpty) {
+      throw Failure('invalid_request', "'body' is empty.");
+    }
+    final parts = countParts(body);
+    if (parts > 10) {
+      throw Failure(
+        'message_too_long',
+        'The message needs $parts SMS parts; at most 10 are allowed.',
+      );
+    }
+    if (requestId != null &&
+        (!_requestId.hasMatch(requestId) || requestId.length > 61)) {
+      throw Failure(
+        'invalid_request',
+        "'requestId' of a group must be 1 to 61 characters of "
+            'A-Z a-z 0-9 . _ -.',
+      );
+    }
+    requestId ??= _randomRequestId();
+    final known = _knownGroup(requestId);
+    if (known.isNotEmpty) {
+      final same = known.length == numbers.length &&
+          known.every((m) => _bodies[m['requestId']] == body) &&
+          numbers.every(
+            (number) => known.any((m) => samePeer(m['to'] as String, number)),
+          );
+      if (!same) {
+        throw Failure(
+          'invalid_request',
+          "'requestId' was already used for another message.",
+        );
+      }
+      return _groupResult(requestId, known);
+    }
+    final total = parts * numbers.length;
+    if (total > 20) {
+      throw Failure(
+        'invalid_request',
+        'This group needs $total SMS parts; at most 20 can be sent per '
+            'minute. Send to fewer recipients or shorten the text.',
+      );
+    }
+    final subscription = _simFor(sim);
+    final members = [
+      for (var index = 0; index < numbers.length; index += 1)
+        _queue(
+          '$requestId.${index + 1}',
+          numbers[index],
+          body,
+          parts,
+          subscription,
+          group: requestId,
+        ),
+    ];
+    return _groupResult(requestId, members);
+  }
+
+  /// The members of a group sent before, oldest first.
+  List<JsonObject> _knownGroup(String requestId) {
+    final members = <JsonObject>[];
+    for (var index = 1; outbox.containsKey('$requestId.$index'); index += 1) {
+      members.add(outbox['$requestId.$index']!);
+    }
+    return members;
   }
 
   Future<void> _transmit(JsonObject entry, String body) async {
@@ -1257,6 +1389,31 @@ List<T> _stableSorted<T>(List<T> items, int Function(T a, T b) compare) {
       return order != 0 ? order : a.$1.compareTo(b.$1);
     });
   return [for (final (_, item) in indexed) item];
+}
+
+const List<String> _statusOrder = ['queued', 'sending', 'sent', 'delivered'];
+
+JsonObject _sendResult(JsonObject entry) => {
+      'requestId': entry['requestId'],
+      'to': entry['to'],
+      'parts': entry['parts'],
+      'status': entry['status'],
+    };
+
+/// The GroupSendResult of [members] as the app builds it.
+JsonObject _groupResult(String requestId, List<JsonObject> members) {
+  final alive = [
+    for (final member in members)
+      if (member['status'] != 'failed') member['status'] as String,
+  ];
+  alive.sort((a, b) => _statusOrder.indexOf(a) - _statusOrder.indexOf(b));
+  return {
+    'requestId': requestId,
+    'to': [for (final member in members) member['to']],
+    'parts': members.first['parts'],
+    'status': alive.isEmpty ? 'failed' : alive.first,
+    'messages': [for (final member in members) _sendResult(member)],
+  };
 }
 
 T _required<T>(JsonObject request, String name) {

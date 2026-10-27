@@ -32,8 +32,8 @@ class SmsDockError implements Exception {
 class ApiError extends SmsDockError {
   /// Creates the error for an error object of the server.
   ApiError(this.code, this.message, [Map<String, dynamic>? details])
-      : details = Map.unmodifiable(details ?? const <String, dynamic>{}),
-        super('$code: $message');
+    : details = Map.unmodifiable(details ?? const <String, dynamic>{}),
+      super('$code: $message');
 
   /// Error code of `API.md`, for example `invalid_number`.
   final String code;
@@ -109,13 +109,13 @@ class ConnectionInterrupted extends SmsDockError {
 class CertificateMismatchError extends SmsDockError {
   /// Creates the error for the two fingerprints.
   CertificateMismatchError(this.expected, this.actual)
-      : super(
-          'The certificate of the server does not match the pinned '
-          'fingerprint.\n  expected: $expected\n  received: $actual\n'
-          'Compare the fingerprint with the Server screen of the app. It '
-          'changes when the certificate is regenerated or the app is '
-          'reinstalled.',
-        );
+    : super(
+        'The certificate of the server does not match the pinned '
+        'fingerprint.\n  expected: $expected\n  received: $actual\n'
+        'Compare the fingerprint with the Server screen of the app. It '
+        'changes when the certificate is regenerated or the app is '
+        'reinstalled.',
+      );
 
   /// The pinned fingerprint.
   final String expected;
@@ -130,10 +130,14 @@ class CertificateMismatchError extends SmsDockError {
 /// some close codes, into a final error.
 class TransportError implements Exception {
   /// Creates the failure with its text and the close frame, if any.
-  TransportError(this.message,
-      {this.closeCode, String? closeReason, this.cause})
-      : closeReason =
-            closeReason == null || closeReason.isEmpty ? null : closeReason;
+  TransportError(
+    this.message, {
+    this.closeCode,
+    String? closeReason,
+    this.cause,
+  }) : closeReason = closeReason == null || closeReason.isEmpty
+           ? null
+           : closeReason;
 
   /// What happened.
   final String message;
@@ -155,8 +159,9 @@ class TransportError implements Exception {
 ApiError apiError(Map<String, dynamic> error) {
   final code = '${error['code'] ?? 'unknown'}';
   final text = error['message'];
-  final message =
-      text == null || text == '' || text == false ? 'no message' : '$text';
+  final message = text == null || text == '' || text == false
+      ? 'no message'
+      : '$text';
   final details = <String, dynamic>{
     for (final entry in error.entries)
       if (entry.key != 'code' && entry.key != 'message') entry.key: entry.value,
@@ -164,8 +169,7 @@ ApiError apiError(Map<String, dynamic> error) {
   return switch (code) {
     'invalid_password' ||
     'locked_out' ||
-    'not_authenticated' =>
-      AuthenticationError(code, message, details),
+    'not_authenticated' => AuthenticationError(code, message, details),
     'licence_required' => LicenceRequiredError(code, message, details),
     _ => ApiError(code, message, details),
   };
@@ -179,27 +183,27 @@ SmsDockError? fatalError(TransportError error) {
   final details = <String, dynamic>{'closeCode': code};
   return switch (code) {
     4401 => AuthenticationError(
-        'not_authenticated',
-        reason ?? 'The server closed the connection: not logged in',
-        details,
-      ),
+      'not_authenticated',
+      reason ?? 'The server closed the connection: not logged in',
+      details,
+    ),
     4410 => AuthenticationError(
-        'not_authenticated',
-        reason ?? 'The password was changed in the app',
-        details,
-      ),
+      'not_authenticated',
+      reason ?? 'The password was changed in the app',
+      details,
+    ),
     4403 => LicenceRequiredError(
-        'licence_required',
-        reason ?? 'The API needs the full licence of the app',
-        details,
-      ),
+      'licence_required',
+      reason ?? 'The API needs the full licence of the app',
+      details,
+    ),
     1009 => ProtocolError(
-        'The server closed the connection: frame larger than 64 KiB',
-      ),
+      'The server closed the connection: frame larger than 64 KiB',
+    ),
     4400 => ProtocolError(
-        'The server closed the connection: protocol error'
-        '${reason == null ? '' : ' ($reason)'}',
-      ),
+      'The server closed the connection: protocol error'
+      '${reason == null ? '' : ' ($reason)'}',
+    ),
     _ => null,
   };
 }

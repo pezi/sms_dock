@@ -20,8 +20,8 @@ use tungstenite::{HandshakeError, Message as Frame, WebSocket};
 
 use crate::error::{Error, Result};
 use crate::models::{
-    AppInfo, Contact, Conversation, DeleteResult, Event, MarkReadResult, Message, OutboxEntry,
-    Page, PingResult, SendResult, Status, Subscription,
+    AppInfo, Contact, Conversation, DeleteResult, Event, GroupSendResult, MarkReadResult, Message,
+    OutboxEntry, Page, PingResult, SendResult, Status, Subscription,
 };
 use crate::tls::{self, Digest32, TlsFailure, TlsStream};
 use crate::{
@@ -985,6 +985,67 @@ impl SmsDockClient {
         ]);
         put(&mut fields, "sim", sim);
         self.call("messages.send", fields)
+    }
+
+    /// Send one text to several numbers, one SMS each.
+    ///
+    /// `to` holds 1 to 20 phone numbers; repeated numbers are sent once.
+    /// Every recipient gets a separate SMS and does not see the others. The
+    /// result holds one [`SendResult`] per recipient; their request ids are
+    /// `<request_id>.1`, `<request_id>.2` and so on, and
+    /// [`wait_for_result`](Self::wait_for_result) and
+    /// [`message_status`](Self::message_status) take them like those of
+    /// single messages.
+    ///
+    /// The phone checks the whole group before it sends anything: a number
+    /// that is not a phone number (`invalid_number`), a text that is too
+    /// long, fewer messages left in the daily limit of the free version
+    /// than the group has recipients (`quota_exceeded`) or more SMS parts
+    /// than the 20 of one minute, parts times recipients
+    /// (`invalid_request`), refuse the whole group. A refusal by the phone
+    /// for one recipient does not stop the others; that member has the
+    /// status `failed` in `messages`.
+    ///
+    /// `request_id` has at most 61 characters here, so that the member
+    /// suffix fits, and works as for [`send`](Self::send): the same id with
+    /// the same text and numbers is not sent again but answered with the
+    /// stored members and their current status.
+    pub fn send_group(
+        &mut self,
+        to: &[&str],
+        body: &str,
+        sim: Option<i64>,
+        request_id: Option<&str>,
+    ) -> Result<GroupSendResult> {
+        if to.is_empty() || to.iter().any(|number| number.trim().is_empty()) {
+            return Err(invalid("'to' must be a list of phone numbers"));
+        }
+        if to.len() > crate::MAX_GROUP_RECIPIENTS {
+            return Err(invalid(format!(
+                "'to' holds more than {} numbers",
+                crate::MAX_GROUP_RECIPIENTS
+            )));
+        }
+        if body.is_empty() {
+            return Err(invalid("'body' must be a text"));
+        }
+        let request_id = match request_id {
+            None => uuid::Uuid::new_v4().simple().to_string(),
+            Some(given) if is_group_request_id(given) => given.to_owned(),
+            Some(_) => {
+                return Err(invalid(
+                    "request_id of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -",
+                ));
+            }
+        };
+        let numbers: Vec<Value> = to.iter().map(|number| Value::from(*number)).collect();
+        let mut fields = object([
+            ("to", numbers.into()),
+            ("body", body.into()),
+            ("requestId", request_id.into()),
+        ]);
+        put(&mut fields, "sim", sim);
+        self.call("messages.sendGroup", fields)
     }
 
     /// Return the outbox entry of a message sent through SMS Dock.
@@ -2140,6 +2201,11 @@ fn is_request_id(text: &str) -> bool {
         && text
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Like [`is_request_id`], but short enough for the member suffix `.NN`.
+fn is_group_request_id(text: &str) -> bool {
+    text.len() <= 61 && is_request_id(text)
 }
 
 fn integer(value: Option<&Value>) -> Option<i64> {

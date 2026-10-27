@@ -182,6 +182,10 @@ channels:
         $ref: '#/components/messages/sendMessageRequest'
       sendMessageResponse:
         $ref: '#/components/messages/sendMessageResponse'
+      sendGroupMessageRequest:
+        $ref: '#/components/messages/sendGroupMessageRequest'
+      sendGroupMessageResponse:
+        $ref: '#/components/messages/sendGroupMessageResponse'
       getMessageStatusRequest:
         $ref: '#/components/messages/getMessageStatusRequest'
       getMessageStatusResponse:
@@ -354,6 +358,31 @@ operations:
         $ref: '#/channels/api'
       messages:
         - $ref: '#/channels/api/messages/sendMessageResponse'
+        - $ref: '#/channels/api/messages/errorResponse'
+  sendGroupMessage:
+    action: receive
+    channel:
+      $ref: '#/channels/api'
+    summary: Send one text to several numbers
+    description: |
+      Action `messages.sendGroup`. The same text goes to every number as a
+      separate SMS; nobody sees the other recipients. The checks run for
+      the whole group before the first SMS leaves: a number that is not a
+      phone number, a text that is too long, fewer messages left in the
+      daily limit than recipients, or more SMS parts than the 20 of one
+      minute (parts × recipients) refuse the whole group. A refusal by the
+      phone for one recipient does not stop the others; that member has
+      the status `failed`. Each member has the request id
+      `<requestId>.<n>` counted from 1 and is followed through the events
+      and `messages.status` like a single message. Sending exactly once
+      works as for `messages.send`, for the whole group.
+    messages:
+      - $ref: '#/channels/api/messages/sendGroupMessageRequest'
+    reply:
+      channel:
+        $ref: '#/channels/api'
+      messages:
+        - $ref: '#/channels/api/messages/sendGroupMessageResponse'
         - $ref: '#/channels/api/messages/errorResponse'
   getMessageStatus:
     action: receive
@@ -785,6 +814,39 @@ components:
       examples:
         - name: sendMessage
           payload: {"id": "8", "ok": true, "result": {"requestId": "b0c1d2", "to": "+4369912345678", "parts": 1, "status": "queued"}}
+    sendGroupMessageRequest:
+      name: sendGroupMessageRequest
+      title: messages.sendGroup request
+      summary: Send one text to several numbers
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        $ref: '#/components/schemas/MessagesSendGroupRequest'
+      examples:
+        - name: sendGroupMessage
+          payload: {"id": "4", "action": "messages.sendGroup", "to": ["+4369912345678", "+436641112223"], "body": "Meeting at 10.", "requestId": "news-1"}
+    sendGroupMessageResponse:
+      name: sendGroupMessageResponse
+      title: messages.sendGroup response
+      summary: Success of messages.sendGroup
+      contentType: application/json
+      correlationId:
+        $ref: '#/components/correlationIds/requestId'
+      payload:
+        type: object
+        required: [id, ok, result]
+        properties:
+          id:
+            $ref: '#/components/schemas/EchoedId'
+          ok:
+            type: boolean
+            const: true
+          result:
+            $ref: '#/components/schemas/GroupSendResult'
+      examples:
+        - name: sendGroupMessage
+          payload: {"id": "4", "ok": true, "result": {"requestId": "news-1", "to": ["+4369912345678", "+436641112223"], "parts": 1, "status": "queued", "messages": [{"requestId": "news-1.1", "to": "+4369912345678", "parts": 1, "status": "queued"}, {"requestId": "news-1.2", "to": "+436641112223", "parts": 1, "status": "queued"}]}}
     getMessageStatusRequest:
       name: getMessageStatusRequest
       title: messages.status request
@@ -1460,6 +1522,43 @@ components:
       examples:
         - b0c1d2
 
+    MessagesSendGroupRequest:
+      type: object
+      required: [action, to, body]
+      properties:
+        id:
+          $ref: '#/components/schemas/RequestId'
+        action:
+          type: string
+          const: messages.sendGroup
+        to:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: string
+          description: |
+            Phone numbers, as in `messages.send`. Repeated numbers are
+            dropped.
+          examples:
+            - ['+4369912345678', '+436641112223']
+        body:
+          type: string
+          description: |
+            Text, at most 10 SMS parts; parts × recipients at most 20.
+        sim:
+          allOf:
+            - $ref: '#/components/schemas/SubscriptionId'
+          description: Subscription id for every message; default is the phone's SMS SIM.
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 61
+          pattern: '^[A-Za-z0-9._-]{1,61}$'
+          description: |
+            Your own id of the group; the members get `<requestId>.<n>`.
+            Repeating it works as for `messages.send`.
+
     MessagesStatusRequest:
       type: object
       required: [action, requestId]
@@ -1900,6 +1999,36 @@ components:
           description: Number of SMS parts.
         status:
           $ref: '#/components/schemas/OutboxStatus'
+
+    GroupSendResult:
+      type: object
+      description: Result of `messages.sendGroup`.
+      required: [requestId, to, parts, status, messages]
+      properties:
+        requestId:
+          type: string
+          description: Id of the group; yours if you sent one.
+        to:
+          type: array
+          items:
+            type: string
+          description: The numbers as they are sent, in the order of `messages`.
+        parts:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Number of SMS parts of the text, the same for every recipient.
+        status:
+          allOf:
+            - $ref: '#/components/schemas/OutboxStatus'
+          description: |
+            The least advanced status of the members, or `failed` when
+            every member failed.
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/SendResult'
+          description: One SendResult per recipient, request id `<requestId>.<n>`.
 
     OutboxStatus:
       type: string

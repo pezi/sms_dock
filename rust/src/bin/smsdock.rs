@@ -7,7 +7,7 @@
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
 use clap::builder::PossibleValuesParser;
@@ -129,6 +129,33 @@ enum Command {
         #[arg(long, value_name = "ID")]
         request_id: Option<String>,
         /// Wait until the message was sent or failed
+        #[arg(long)]
+        wait: bool,
+        /// Longest time to wait with --wait
+        #[arg(long, value_name = "SECONDS", default_value_t = 60.0)]
+        wait_timeout: f64,
+    },
+    /// Send one text to several numbers, one SMS each
+    #[command(
+        long_about = "Send the same text to several numbers as separate SMS. Without --text the \
+                      text is read from standard input."
+    )]
+    SendGroup {
+        #[command(flatten)]
+        connection: Connection,
+        /// Phone number of a recipient; repeat for every recipient (at most 20)
+        #[arg(long, value_name = "NUMBER", required = true)]
+        to: Vec<String>,
+        /// Text of the message
+        #[arg(long)]
+        text: Option<String>,
+        /// Subscription id of the SIM
+        #[arg(long, value_name = "ID")]
+        sim: Option<i64>,
+        /// Your own id of the group; the same id is sent only once
+        #[arg(long, value_name = "ID")]
+        request_id: Option<String>,
+        /// Wait until every message was sent or failed
         #[arg(long)]
         wait: bool,
         /// Longest time to wait with --wait
@@ -342,6 +369,18 @@ fn run(command: Command) -> Outcome {
         } => {
             let wait = wait.then_some(wait_timeout);
             send(&connection, &to, text, sim, request_id.as_deref(), wait)
+        }
+        Command::SendGroup {
+            connection,
+            to,
+            text,
+            sim,
+            request_id,
+            wait,
+            wait_timeout,
+        } => {
+            let wait = wait.then_some(wait_timeout);
+            send_group(&connection, &to, text, sim, request_id.as_deref(), wait)
         }
         Command::Delete { connection, target } => delete(&connection, &target),
         Command::MarkRead {
@@ -557,25 +596,7 @@ fn send(
     wait: Option<f64>,
 ) -> Outcome {
     let mut dock = client(connection)?;
-    let text = match text {
-        Some(text) => text,
-        None => {
-            if io::stdin().is_terminal() {
-                return Err(Fault::Usage(
-                    "No text. Pass --text or write it to standard input.".to_owned(),
-                ));
-            }
-            let mut text = String::new();
-            io::stdin().read_to_string(&mut text)?;
-            if text.ends_with('\n') {
-                text.pop();
-            }
-            text
-        }
-    };
-    if text.is_empty() {
-        return Err(Fault::Usage("The text is empty.".to_owned()));
-    }
+    let text = text_of(text)?;
     let result = dock.send(to, &text, sim, request_id)?;
     // Also without --wait: a repeated request id tells the old outcome.
     let (status, to, parts, request_id, error_code, json) = match wait {
@@ -616,6 +637,101 @@ fn send(
         ))?;
     }
     Ok(if failed { EXIT_API_ERROR } else { EXIT_OK })
+}
+
+/// The text to send: `--text`, or standard input without it.
+fn text_of(text: Option<String>) -> Result<String, Fault> {
+    let text = match text {
+        Some(text) => text,
+        None => {
+            if io::stdin().is_terminal() {
+                return Err(Fault::Usage(
+                    "No text. Pass --text or write it to standard input.".to_owned(),
+                ));
+            }
+            let mut text = String::new();
+            io::stdin().read_to_string(&mut text)?;
+            if text.ends_with('\n') {
+                text.pop();
+            }
+            text
+        }
+    };
+    if text.is_empty() {
+        return Err(Fault::Usage("The text is empty.".to_owned()));
+    }
+    Ok(text)
+}
+
+fn send_group(
+    connection: &Connection,
+    to: &[String],
+    text: Option<String>,
+    sim: Option<i64>,
+    request_id: Option<&str>,
+    wait: Option<f64>,
+) -> Outcome {
+    let mut dock = client(connection)?;
+    let text = text_of(text)?;
+    let numbers: Vec<&str> = to.iter().map(String::as_str).collect();
+    let result = dock.send_group(&numbers, &text, sim, request_id)?;
+    // One line per member: status, number, error code, request id.
+    let mut members: Vec<(String, String, Option<i64>, String)> = Vec::new();
+    let mut json = serde_json::to_value(&result).map_err(io::Error::from)?;
+    let deadline = match wait {
+        Some(timeout) => Some(Instant::now() + seconds(timeout)?),
+        None => None,
+    };
+    for (index, member) in result.messages.iter().enumerate() {
+        let waited = match deadline {
+            Some(deadline) if member.status != "failed" => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                Some(dock.wait_for_result(&member.request_id, Some(left))?)
+            }
+            _ => None,
+        };
+        match waited {
+            Some(entry) => {
+                json["messages"][index] = serde_json::to_value(&entry).map_err(io::Error::from)?;
+                members.push((entry.status, entry.to, entry.error_code, entry.request_id));
+            }
+            None => members.push((
+                member.status.clone(),
+                member.to.clone(),
+                None,
+                member.request_id.clone(),
+            )),
+        }
+    }
+    let failed = members
+        .iter()
+        .filter(|(status, ..)| status == "failed")
+        .count();
+    if connection.json {
+        print_text(&to_json(&json)?)?;
+    } else {
+        print_line(&format!(
+            "Group {}: {} recipient(s), {} part(s) each",
+            result.request_id,
+            members.len(),
+            result.parts
+        ))?;
+        for (status, to, error_code, request_id) in &members {
+            if status == "failed" {
+                let cause = error_code.map_or(String::new(), |code| format!(", error code {code}"));
+                print_line(&format!("  Failed: {to}{cause}, requestId {request_id}"))?;
+            } else {
+                print_line(&format!(
+                    "  {}: {to}, requestId {request_id}",
+                    capitalize(status)
+                ))?;
+            }
+        }
+        if failed > 0 {
+            eprintln!("smsdock: {failed} of {} message(s) failed", members.len());
+        }
+    }
+    Ok(if failed > 0 { EXIT_API_ERROR } else { EXIT_OK })
 }
 
 fn delete(connection: &Connection, target: &DeleteTarget) -> Outcome {
@@ -1115,6 +1231,15 @@ mod tests {
             panic!("not the send command");
         };
         assert_eq!((text, wait), (None, false));
+        let Command::SendGroup { to, text, wait, .. } =
+            parse(&["send-group", URL, "--to", "+43123", "--to", "+43456"])
+                .unwrap()
+                .command
+        else {
+            panic!("not the send-group command");
+        };
+        assert_eq!(to, ["+43123", "+43456"]);
+        assert_eq!((text, wait), (None, false));
         let Command::Listen { events, .. } = parse(&[
             "listen",
             URL,
@@ -1134,7 +1259,7 @@ mod tests {
 
     #[test]
     fn usage_errors() {
-        let cases: [&[&str]; 15] = [
+        let cases: [&[&str]; 16] = [
             &[],
             &["unknown"],
             &["status"],
@@ -1144,6 +1269,7 @@ mod tests {
             &["messages", URL, "--limit", "many"],
             &["messages", URL, "--since", "yesterday"],
             &["send", URL, "--text", "no recipient"],
+            &["send-group", URL, "--text", "no recipient"],
             &["delete", URL],
             &["delete", URL, "--message", "1", "--conversation", "2"],
             &["mark-read", URL],
@@ -1166,6 +1292,7 @@ mod tests {
             "conversations",
             "messages",
             "send",
+            "send-group",
             "delete",
             "mark-read",
             "contacts",

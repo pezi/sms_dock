@@ -400,6 +400,41 @@ class CliTest extends ServerTestBase {
     }
 
     @Test
+    void sendGroup() {
+        Result result = dock("send-group", "--to", BEN, ANNA, "--text", "Hello all",
+            "--request-id", "news-1", "--sim", "2");
+        assertEquals(0, result.code(), result.err());
+        assertEquals("Group news-1: 2 recipient(s), 1 part(s) each\n"
+            + "  Queued: " + BEN + ", requestId news-1.1\n"
+            + "  Queued: " + ANNA + ", requestId news-1.2\n", result.out());
+        assertEquals(2, server.sent().size());
+        assertEquals(2L, server.sent().get(1).get("sim"));
+        assertEquals("Hello all", server.sent().get(1).get("body"));
+    }
+
+    @Test
+    void sendGroupAndWait() {
+        server.failNumbers.add(ANNA);
+        Result result = dock("send-group", "--to", BEN, ANNA, "--text", "Hello all",
+            "--request-id", "news-2", "--wait");
+        assertEquals(1, result.code());
+        assertEquals("Group news-2: 2 recipient(s), 1 part(s) each\n"
+            + "  Sent: " + BEN + ", requestId news-2.1\n"
+            + "  Failed: " + ANNA + ", error code 1, requestId news-2.2\n", result.out());
+        assertEquals("smsdock: 1 of 2 message(s) failed\n", result.err());
+    }
+
+    @Test
+    void sendGroupJson() {
+        Result result = dock("send-group", "--to", BEN, "--text", "Hello",
+            "--request-id", "news-3", "--json");
+        assertEquals(0, result.code(), result.err());
+        assertEquals(FakeSmsDock.object("requestId", "news-3", "to", List.of(BEN), "parts", 1L,
+            "status", "queued", "messages", List.of(FakeSmsDock.object("requestId", "news-3.1",
+                "to", BEN, "parts", 1L, "status", "queued"))), result.json());
+    }
+
+    @Test
     void sendFromStandardInput() {
         input = "Line one\nLine two\n";
         Result result = dock("send", "--to", BEN, "--sim", "2", "--request-id", "cron-1",

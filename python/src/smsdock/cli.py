@@ -164,6 +164,28 @@ def build_parser() -> argparse.ArgumentParser:
                       metavar="SECONDS",
                       help="longest time to wait with --wait (default: 60)")
 
+    send_group = commands.add_parser(
+        "send-group", parents=[connection], allow_abbrev=False,
+        help="send one text to several numbers, one SMS each",
+        description="Send the same text to several numbers as separate SMS. "
+                    "Without --text the text is read from standard input.",
+    )
+    send_group.add_argument("--to", required=True, action="append",
+                            metavar="NUMBER",
+                            help="phone number of a recipient; repeat for "
+                                 "every recipient (at most 20)")
+    send_group.add_argument("--text", help="text of the message")
+    send_group.add_argument("--sim", type=int, metavar="ID",
+                            help="subscription id of the SIM")
+    send_group.add_argument("--request-id", metavar="ID",
+                            help="your own id of the group; the same id is "
+                                 "sent only once")
+    send_group.add_argument("--wait", action="store_true",
+                            help="wait until every message was sent or failed")
+    send_group.add_argument("--wait-timeout", type=float, default=60.0,
+                            metavar="SECONDS",
+                            help="longest time to wait with --wait (default: 60)")
+
     delete = commands.add_parser(
         "delete", parents=[connection], allow_abbrev=False,
         help="delete a message or a conversation",
@@ -374,7 +396,9 @@ def _messages(client: SmsDockClient, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _send(client: SmsDockClient, args: argparse.Namespace) -> int:
+def _text_of(args: argparse.Namespace) -> str:
+    """Return the text to send: ``--text`` or standard input."""
+
     text = args.text
     if text is None:
         if sys.stdin.isatty():
@@ -383,6 +407,11 @@ def _send(client: SmsDockClient, args: argparse.Namespace) -> int:
         text = text.removesuffix("\n")
     if not text:
         raise UsageError("The text is empty.")
+    return text
+
+
+def _send(client: SmsDockClient, args: argparse.Namespace) -> int:
+    text = _text_of(args)
     result: dict[str, Any] = dict(client.send(
         args.to, text, sim=args.sim, request_id=args.request_id
     ))
@@ -482,11 +511,54 @@ def _report_reconnect(client: SmsDockClient) -> None:
     print(f"smsdock: reconnected; {lost}", file=sys.stderr, flush=True)
 
 
+def _send_group(client: SmsDockClient, args: argparse.Namespace) -> int:
+    text = _text_of(args)
+    result: dict[str, Any] = dict(client.send_group(
+        args.to, text, sim=args.sim, request_id=args.request_id
+    ))
+    members: list[dict[str, Any]] = [dict(m) for m in result["messages"]]
+    if args.wait:
+        deadline = time.monotonic() + args.wait_timeout
+        members = [
+            dict(client.wait_for_result(
+                member["requestId"], max(0.0, deadline - time.monotonic())
+            )) if member.get("status") != "failed" else member
+            for member in members
+        ]
+        result["messages"] = members
+    failed = [m for m in members if m.get("status") == "failed"]
+    if args.json:
+        _print_json(result)
+    else:
+        print(
+            f"Group {result.get('requestId')}: {len(members)} recipient(s), "
+            f"{result.get('parts')} part(s) each"
+        )
+        for member in members:
+            if member.get("status") == "failed":
+                code = member.get("errorCode")
+                cause = "" if code is None else f", error code {code}"
+                print(f"  Failed: {member.get('to')}{cause}, "
+                      f"requestId {member.get('requestId')}")
+            else:
+                print(
+                    f"  {str(member.get('status')).capitalize()}: "
+                    f"{member.get('to')}, requestId {member.get('requestId')}"
+                )
+        if failed:
+            print(
+                f"smsdock: {len(failed)} of {len(members)} message(s) failed",
+                file=sys.stderr,
+            )
+    return EXIT_API_ERROR if failed else EXIT_OK
+
+
 _COMMANDS = {
     "status": _status,
     "conversations": _conversations,
     "messages": _messages,
     "send": _send,
+    "send-group": _send_group,
     "delete": _delete,
     "mark-read": _mark_read,
     "contacts": _contacts,

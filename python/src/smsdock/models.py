@@ -127,6 +127,22 @@ class SendResult(TypedDict):
     status: str
 
 
+class GroupSendResult(TypedDict):
+    """Result of ``messages.sendGroup``: one SMS per recipient.
+
+    ``messages`` holds one :class:`SendResult` per recipient in the order
+    of ``to``, with the request ids ``<requestId>.1``, ``<requestId>.2``
+    and so on. ``status`` is the least advanced status of the members, or
+    ``failed`` when every member failed.
+    """
+
+    requestId: str
+    to: list[str]
+    parts: int
+    status: str
+    messages: list[SendResult]
+
+
 class OutboxEntry(TypedDict):
     """State of a message sent through SMS Dock.
 

@@ -116,6 +116,15 @@ smsdock send wss://192.168.1.50:9443/ws \
 Sent: +4369912345678, 1 part(s), requestId e2784e0c831a42aa842da84c43a49da9
 ```
 
+One text to several numbers goes out as one SMS per recipient; nobody
+sees the other recipients. Every client has a method for it (`send_group`
+in Python) and the command `send-group`:
+
+```bash
+smsdock send-group wss://192.168.1.50:9443/ws \
+  --to +4369912345678 --to +436641112223 --text 'Meeting at 10.' --wait
+```
+
 ### 6. React to incoming messages
 
 Print every SMS as it arrives:
@@ -218,7 +227,9 @@ connection with code 4403.
 
 - SMS only. MMS and RCS messages are neither shown nor sent.
 - Group threads are not supported. A conversation is the list of messages
-  exchanged with one number.
+  exchanged with one number. A group message (`messages.sendGroup`) is
+  one SMS per recipient, at most 20; the replies arrive in the
+  conversations of the single recipients.
 - A message has at most 10 SMS parts: 1530 plain or 670 Unicode
   characters.
 - The phone sends at most 20 SMS parts per minute.

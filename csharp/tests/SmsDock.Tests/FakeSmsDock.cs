@@ -116,6 +116,7 @@ internal sealed partial class FakeSmsDock : IAsyncDisposable
     private readonly List<string> _framesBeforeResponse = [];
     private readonly List<string> _held = [];
     private readonly HashSet<string> _failNumbers = [];
+    private readonly HashSet<string> _refuseNumbers = [];
     private Task? _acceptLoop;
     private long _nextMessageId = 2800;
     private long _sequence;
@@ -389,6 +390,9 @@ internal sealed partial class FakeSmsDock : IAsyncDisposable
     public void FailNumber(string number) => Locked(() => _failNumbers.Add(number));
 
     public void ClearFailNumbers() => Locked(_failNumbers.Clear);
+
+    /// <summary>Lets the phone refuse this number at once (<c>send_refused</c>), as it can in a group.</summary>
+    public void RefuseNumber(string number) => Locked(() => _refuseNumbers.Add(number));
 
     /// <summary>The outbox entry of a request, or <c>null</c>.</summary>
     public JsonObject? Outbox(string requestId) =>
@@ -949,6 +953,7 @@ internal sealed partial class FakeSmsDock : IAsyncDisposable
             "conversations.markRead" => ConversationsMarkRead(request),
             "contacts.list" => ContactsList(request),
             "messages.send" => await MessagesSendAsync(request),
+            "messages.sendGroup" => await MessagesSendGroupAsync(request),
             "subscribe" => Subscribe(client, request),
             "unsubscribe" => Unsubscribe(client, request),
             _ => throw new Failure("unknown_action", $"Unknown action '{action}'."),
@@ -1223,15 +1228,30 @@ internal sealed partial class FakeSmsDock : IAsyncDisposable
                 ["status"] = Text(known, "status"),
             };
         }
+        var subscription = Subscription(sim);
+        requestId ??= Guid.NewGuid().ToString("N");
+        var entry = await AcceptAsync(requestId, number, body, parts, subscription, null);
+        return SendResultOf(entry);
+    }
+
+    /// <summary>Returns the SIM to send with; the default one without <paramref name="sim"/>.</summary>
+    private long Subscription(long? sim)
+    {
         if (sim is null)
         {
-            sim = Number(_sims.First(candidate => candidate["isDefault"]!.GetValue<bool>()), "subscriptionId");
+            return Number(_sims.First(candidate => candidate["isDefault"]!.GetValue<bool>()), "subscriptionId");
         }
-        else if (_sims.All(candidate => Number(candidate, "subscriptionId") != sim))
+        if (_sims.All(candidate => Number(candidate, "subscriptionId") != sim))
         {
             throw new Failure("sim_unavailable", $"No SIM with the subscription id {sim}.");
         }
-        requestId ??= Guid.NewGuid().ToString("N");
+        return sim.Value;
+    }
+
+    /// <summary>Queues one message that passed the checks and starts sending it.</summary>
+    private async Task<JsonObject> AcceptAsync(
+        string requestId, string number, string body, long parts, long sim, string? group)
+    {
         var entry = new JsonObject
         {
             ["requestId"] = requestId, ["to"] = number, ["parts"] = parts, ["partsSent"] = 0,
@@ -1240,13 +1260,140 @@ internal sealed partial class FakeSmsDock : IAsyncDisposable
         };
         _outbox[requestId] = entry;
         _bodies[requestId] = body;
-        _sent.Add(new JsonObject { ["requestId"] = requestId, ["to"] = number, ["body"] = body, ["sim"] = sim });
+        var sent = new JsonObject { ["requestId"] = requestId, ["to"] = number, ["body"] = body, ["sim"] = sim };
+        if (group is not null)
+        {
+            sent["group"] = group;
+        }
+        _sent.Add(sent);
         await EmitLockedAsync("sms.queued", new JsonObject
         {
             ["requestId"] = requestId, ["to"] = number, ["parts"] = parts, ["sim"] = sim, ["source"] = "api",
         });
+        if (_refuseNumbers.Contains(number))
+        {
+            // The phone did not even take the message.
+            entry["status"] = "failed";
+            await EmitLockedAsync("sms.failed", new JsonObject
+            {
+                ["requestId"] = requestId, ["id"] = null, ["conversationId"] = null, ["to"] = number,
+                ["errorCode"] = null, ["reason"] = "send_refused",
+            });
+            return entry;
+        }
         _ = Task.Run(() => TransmitAsync(entry, body));
-        return new JsonObject { ["requestId"] = requestId, ["to"] = number, ["parts"] = parts, ["status"] = "queued" };
+        return entry;
+    }
+
+    private static JsonObject SendResultOf(JsonObject entry) => new()
+    {
+        ["requestId"] = Text(entry, "requestId"), ["to"] = Text(entry, "to"), ["parts"] = Number(entry, "parts"),
+        ["status"] = Text(entry, "status"),
+    };
+
+    private static readonly string[] s_statusOrder = ["queued", "sending", "sent", "delivered"];
+
+    /// <summary>Returns the GroupSendResult of the members as the app builds it.</summary>
+    private static JsonObject GroupResultOf(string requestId, List<JsonObject> members)
+    {
+        var alive = members.Select(member => Text(member, "status")).Where(status => status != "failed").ToList();
+        var status = alive.Count == 0 ? "failed" : alive.MinBy(value => Array.IndexOf(s_statusOrder, value))!;
+        return new JsonObject
+        {
+            ["requestId"] = requestId,
+            ["to"] = new JsonArray([.. members.Select(member => (JsonNode)Text(member, "to"))]),
+            ["parts"] = Number(members[0], "parts"),
+            ["status"] = status,
+            ["messages"] = new JsonArray([.. members.Select(member => (JsonNode)SendResultOf(member))]),
+        };
+    }
+
+    /// <summary>The members of a group sent before, oldest first.</summary>
+    private List<JsonObject> KnownGroup(string requestId)
+    {
+        var members = new List<JsonObject>();
+        for (var index = 1; _outbox.TryGetValue($"{requestId}.{index}", out var member); index++)
+        {
+            members.Add(member);
+        }
+        return members;
+    }
+
+    private async Task<JsonObject> MessagesSendGroupAsync(JsonObject request)
+    {
+        if (request["to"] is not JsonArray list)
+        {
+            throw new Failure("invalid_request", "'to' is missing.");
+        }
+        var body = RequiredString(request, "body");
+        var sim = OptionalInteger(request, "sim");
+        var requestId = OptionalString(request, "requestId");
+        if (list.Count == 0)
+        {
+            throw new Failure("invalid_request", "'to' is missing.");
+        }
+        var numbers = new List<string>();
+        foreach (var item in list)
+        {
+            var text = PyText.AsString(item) ?? throw new Failure("invalid_request", "'to' must contain strings.");
+            var number = NormalizeNumber(text);
+            if (!PhoneNumber().IsMatch(number))
+            {
+                throw new Failure("invalid_number", $"'to' contains '{text}', which is not a phone number.");
+            }
+            if (!numbers.Any(known => SamePeer(known, number)))
+            {
+                numbers.Add(number);
+            }
+        }
+        if (numbers.Count > 20)
+        {
+            throw new Failure("invalid_request", "A group message goes to at most 20 recipients.");
+        }
+        if (body.Length == 0)
+        {
+            throw new Failure("invalid_request", "'body' is empty.");
+        }
+        var parts = CountParts(body);
+        if (parts > 10)
+        {
+            throw new Failure(
+                "message_too_long", $"The message needs {parts} SMS parts; at most 10 are allowed.");
+        }
+        if (requestId is not null && (!RequestIdPattern().IsMatch(requestId) || requestId.Length > 61))
+        {
+            throw new Failure(
+                "invalid_request", "'requestId' of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -.");
+        }
+        requestId ??= Guid.NewGuid().ToString("N");
+        var known = KnownGroup(requestId);
+        if (known.Count > 0)
+        {
+            var same = known.Count == numbers.Count
+                && known.All(member => _bodies[Text(member, "requestId")] == body)
+                && numbers.All(number => known.Any(member => SamePeer(Text(member, "to"), number)));
+            if (!same)
+            {
+                throw new Failure("invalid_request", "'requestId' was already used for another message.");
+            }
+            return GroupResultOf(requestId, known);
+        }
+        var total = parts * numbers.Count;
+        if (total > 20)
+        {
+            throw new Failure(
+                "invalid_request",
+                $"This group needs {total} SMS parts; at most 20 can be sent per minute. "
+                + "Send to fewer recipients or shorten the text.");
+        }
+        var subscription = Subscription(sim);
+        var members = new List<JsonObject>();
+        for (var index = 0; index < numbers.Count; index++)
+        {
+            members.Add(await AcceptAsync(
+                $"{requestId}.{index + 1}", numbers[index], body, parts, subscription, requestId));
+        }
+        return GroupResultOf(requestId, members);
     }
 
     private async Task TransmitAsync(JsonObject entry, string body)

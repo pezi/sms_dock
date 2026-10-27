@@ -193,6 +193,8 @@ pub struct State {
     pub messages: Vec<Value>,
     pub outbox: JsonObject,
     pub fail_numbers: HashSet<String>,
+    /// Numbers the phone refuses at once (`send_refused`), without a row.
+    pub refuse_numbers: HashSet<String>,
     /// Messages handed to the (imaginary) radio, one entry per SMS.
     pub sent: Vec<Value>,
     /// Every request object received and not refused, in order.
@@ -238,6 +240,7 @@ impl State {
             messages: Vec::new(),
             outbox: JsonObject::new(),
             fail_numbers: HashSet::new(),
+            refuse_numbers: HashSet::new(),
             sent: Vec::new(),
             requests: Vec::new(),
             refused_count: 0,
@@ -730,8 +733,7 @@ impl State {
             ));
         }
         let number = normalize_number(to);
-        let digits = number.strip_prefix('+').unwrap_or(&number);
-        if !(3..=15).contains(&digits.len()) || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        if !is_dialable(&number) {
             return Err(Failure::new(
                 "invalid_number",
                 "'to' is not a phone number.",
@@ -764,31 +766,58 @@ impl State {
             });
             return Ok((result, None));
         }
-        let sim = match sim {
-            Some(sim) if self.sims.iter().all(|s| s["subscriptionId"] != sim) => {
-                return Err(Failure::new(
-                    "sim_unavailable",
-                    format!("No SIM with the subscription id {sim}."),
-                ));
-            }
-            Some(sim) => sim,
-            None => 1,
-        };
+        let sim = self.subscription(sim)?;
         let request_id = match request_id {
             Some(request_id) => request_id.to_owned(),
             None => format!("generated-{}", self.outbox.len() + 1),
         };
+        if !self.accept(&request_id, &number, body, parts, sim, None) {
+            return Err(Failure::new(
+                "send_failed",
+                "The phone refused the message.",
+            ));
+        }
+        Ok((send_result(&self.outbox[&request_id]), Some(request_id)))
+    }
+
+    /// The SIM to send with; the default one without `sim`.
+    fn subscription(&self, sim: Option<i64>) -> Result<i64, Failure> {
+        match sim {
+            Some(sim) if self.sims.iter().all(|s| s["subscriptionId"] != sim) => Err(Failure::new(
+                "sim_unavailable",
+                format!("No SIM with the subscription id {sim}."),
+            )),
+            Some(sim) => Ok(sim),
+            None => Ok(1),
+        }
+    }
+
+    /// Queue one message that passed the checks. Returns whether the phone
+    /// took it; a refused one is `failed` at once and is not transmitted.
+    fn accept(
+        &mut self,
+        request_id: &str,
+        number: &str,
+        body: &str,
+        parts: usize,
+        sim: i64,
+        group: Option<&str>,
+    ) -> bool {
         let entry = json!({
             "requestId": request_id, "to": number, "parts": parts,
             "partsSent": 0, "status": "queued", "errorCode": null,
             "messageId": null, "sim": sim, "source": "api",
             "createdAt": now_millis(),
         });
-        self.outbox.insert(request_id.clone(), entry);
-        self.bodies.insert(request_id.clone(), body.to_owned());
-        self.sent.push(json!({
+        self.outbox.insert(request_id.to_owned(), entry);
+        self.bodies.insert(request_id.to_owned(), body.to_owned());
+        let mut sent = json!({
             "requestId": request_id, "to": number, "body": body, "sim": sim,
-        }));
+        });
+        if let Some(group) = group {
+            sent["group"] = json!(group);
+        }
+        self.sent.push(sent);
         self.emit(
             "sms.queued",
             json!({
@@ -796,10 +825,136 @@ impl State {
                 "sim": sim, "source": "api",
             }),
         );
-        let result = json!({
-            "requestId": request_id, "to": number, "parts": parts, "status": "queued",
-        });
-        Ok((result, Some(request_id)))
+        if self.refuse_numbers.contains(number) {
+            self.outbox[request_id]["status"] = json!("failed");
+            self.emit(
+                "sms.failed",
+                json!({
+                    "requestId": request_id, "id": null, "conversationId": null,
+                    "to": number, "errorCode": null, "reason": "send_refused",
+                }),
+            );
+            return false;
+        }
+        true
+    }
+
+    /// Accept a group: the checks of the app for the whole group, then one
+    /// message per recipient. Returns the result and the request ids to
+    /// transmit.
+    fn messages_send_group(
+        &mut self,
+        request: &JsonObject,
+    ) -> Result<(Value, Vec<String>), Failure> {
+        let to = match request.get("to") {
+            None | Some(Value::Null) => return Err(missing("to")),
+            Some(Value::Array(items)) => items.clone(),
+            Some(Value::String(text)) => vec![json!(text)],
+            Some(_) => return Err(malformed("to")),
+        };
+        let body = required_text(request, "body")?;
+        let sim = optional_integer(request, "sim")?;
+        let request_id = optional_text(request, "requestId")?;
+        if to.is_empty() {
+            return Err(missing("to"));
+        }
+        let mut numbers: Vec<String> = Vec::new();
+        for item in &to {
+            let Some(item) = item.as_str() else {
+                return Err(Failure::new(
+                    "invalid_request",
+                    "'to' must contain strings.",
+                ));
+            };
+            let number = normalize_number(item);
+            if !is_dialable(&number) {
+                return Err(Failure::new(
+                    "invalid_number",
+                    format!("'to' contains '{item}', which is not a phone number."),
+                ));
+            }
+            if !numbers.iter().any(|known| same_peer(known, &number)) {
+                numbers.push(number);
+            }
+        }
+        if numbers.len() > 20 {
+            return Err(Failure::new(
+                "invalid_request",
+                "A group message goes to at most 20 recipients.",
+            ));
+        }
+        if body.is_empty() {
+            return Err(Failure::new("invalid_request", "'body' is empty."));
+        }
+        let parts = count_parts(body);
+        if parts > 10 {
+            return Err(Failure::new(
+                "message_too_long",
+                format!("The message needs {parts} SMS parts; at most 10 are allowed."),
+            ));
+        }
+        if request_id.is_some_and(|id| !is_request_id(id) || id.len() > 61) {
+            return Err(Failure::new(
+                "invalid_request",
+                "'requestId' of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -.",
+            ));
+        }
+        let request_id = match request_id {
+            Some(request_id) => request_id.to_owned(),
+            None => format!("generated-{}", self.outbox.len() + 1),
+        };
+        let known = self.known_group(&request_id);
+        if !known.is_empty() {
+            let same = known.len() == numbers.len()
+                && known
+                    .iter()
+                    .all(|id| self.bodies.get(id).map(String::as_str) == Some(body))
+                && numbers.iter().all(|number| {
+                    known
+                        .iter()
+                        .any(|id| same_peer(text(&self.outbox[id], "to"), number))
+                });
+            if !same {
+                return Err(Failure::new(
+                    "invalid_request",
+                    "'requestId' was already used for another message.",
+                ));
+            }
+            let members: Vec<Value> = known.iter().map(|id| self.outbox[id].clone()).collect();
+            return Ok((group_result(&request_id, &members), Vec::new()));
+        }
+        let total = parts * numbers.len();
+        if total > 20 {
+            return Err(Failure::new(
+                "invalid_request",
+                format!(
+                    "This group needs {total} SMS parts; at most 20 can be sent per minute. \
+                     Send to fewer recipients or shorten the text."
+                ),
+            ));
+        }
+        let sim = self.subscription(sim)?;
+        let mut transmit = Vec::new();
+        let mut members = Vec::new();
+        for (index, number) in numbers.iter().enumerate() {
+            let member_id = format!("{request_id}.{}", index + 1);
+            if self.accept(&member_id, number, body, parts, sim, Some(&request_id)) {
+                transmit.push(member_id.clone());
+            }
+            members.push(self.outbox[&member_id].clone());
+        }
+        Ok((group_result(&request_id, &members), transmit))
+    }
+
+    /// The member ids of a group sent before, in order.
+    fn known_group(&self, request_id: &str) -> Vec<String> {
+        let mut members = Vec::new();
+        let mut index = 1;
+        while self.outbox.contains_key(&format!("{request_id}.{index}")) {
+            members.push(format!("{request_id}.{index}"));
+            index += 1;
+        }
+        members
     }
 
     fn subscribe(&mut self, id: u64, request: &JsonObject) -> Result<Value, Failure> {
@@ -978,6 +1133,14 @@ impl Shared {
             "messages.send" => {
                 let (result, transmit) = state.messages_send(request)?;
                 if let Some(request_id) = transmit {
+                    let shared = Arc::clone(self);
+                    thread::spawn(move || shared.transmit(&request_id));
+                }
+                result
+            }
+            "messages.sendGroup" => {
+                let (result, transmit) = state.messages_send_group(request)?;
+                for request_id in transmit {
                     let shared = Arc::clone(self);
                     thread::spawn(move || shared.transmit(&request_id));
                 }
@@ -1517,6 +1680,38 @@ pub fn now_millis() -> i64 {
 
 fn text<'a>(value: &'a Value, name: &str) -> &'a str {
     value[name].as_str().unwrap_or("")
+}
+
+/// Whether a normalised number is one the phone can dial.
+fn is_dialable(number: &str) -> bool {
+    let digits = number.strip_prefix('+').unwrap_or(number);
+    (3..=15).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The SendResult object of an outbox entry.
+fn send_result(entry: &Value) -> Value {
+    json!({
+        "requestId": entry["requestId"], "to": entry["to"],
+        "parts": entry["parts"], "status": entry["status"],
+    })
+}
+
+/// The GroupSendResult of `members`, as the app builds it.
+fn group_result(request_id: &str, members: &[Value]) -> Value {
+    const ORDER: [&str; 4] = ["queued", "sending", "sent", "delivered"];
+    let status = members
+        .iter()
+        .map(|member| text(member, "status"))
+        .filter(|status| *status != "failed")
+        .min_by_key(|status| ORDER.iter().position(|known| known == status))
+        .unwrap_or("failed");
+    json!({
+        "requestId": request_id,
+        "to": members.iter().map(|m| m["to"].clone()).collect::<Vec<_>>(),
+        "parts": members.first().map_or(json!(1), |m| m["parts"].clone()),
+        "status": status,
+        "messages": members.iter().map(send_result).collect::<Vec<_>>(),
+    })
 }
 
 fn sort_key(item: &Value) -> (i64, i64) {

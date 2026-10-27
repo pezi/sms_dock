@@ -362,22 +362,31 @@ func (a *App) messages(run *session) error {
 	return nil
 }
 
-func (a *App) send(run *session) error {
-	args := run.args
+// messageText returns the text to send: --text or standard input.
+func (a *App) messageText(args *arguments) (string, error) {
 	message := args.text("--text")
 	if !args.has("--text") {
 		if a.StdinIsTerminal != nil && a.StdinIsTerminal() {
-			return &usageError{
+			return "", &usageError{
 				"No text. Pass --text or write it to standard input."}
 		}
 		input, err := io.ReadAll(a.Stdin)
 		if err != nil {
-			return err
+			return "", err
 		}
 		message = strings.TrimSuffix(string(input), "\n")
 	}
 	if message == "" {
-		return &usageError{"The text is empty."}
+		return "", &usageError{"The text is empty."}
+	}
+	return message, nil
+}
+
+func (a *App) send(run *session) error {
+	args := run.args
+	message, err := a.messageText(args)
+	if err != nil {
+		return err
 	}
 	sent, err := run.client.Send(
 		run.ctx, args.text("--to"), message, &smsdock.SendOptions{
@@ -420,6 +429,101 @@ func (a *App) send(run *session) error {
 			capitalize(status), to, parts, requestID)
 	}
 	if failed {
+		return &exit{ExitAPIError}
+	}
+	return nil
+}
+
+// groupJSON is the GroupSendResult printed by send-group --json; with
+// --wait the members are outbox entries.
+type groupJSON struct {
+	RequestID string            `json:"requestId"`
+	To        []string          `json:"to"`
+	Parts     int               `json:"parts"`
+	Status    string            `json:"status"`
+	Messages  []json.RawMessage `json:"messages"`
+}
+
+func (a *App) sendGroup(run *session) error {
+	args := run.args
+	message, err := a.messageText(args)
+	if err != nil {
+		return err
+	}
+	result, err := run.client.SendGroup(
+		run.ctx, args.list("--to"), message, &smsdock.SendOptions{
+			Sim:       optionalInt(args, "--sim"),
+			RequestID: args.text("--request-id"),
+		})
+	if err != nil {
+		return err
+	}
+	type member struct {
+		to, status, requestID string
+		errorCode             *int
+		raw                   json.RawMessage
+	}
+	members := make([]member, 0, len(result.Messages))
+	deadline := time.Now().Add(duration(args.float("--wait-timeout")))
+	for _, sent := range result.Messages {
+		current := member{sent.To, sent.Status, sent.RequestID, nil, sent.Raw}
+		if args.flag("--wait") && sent.Status != "failed" {
+			entry, err := run.client.WaitForResult(
+				run.ctx, sent.RequestID, &smsdock.WaitOptions{
+					Timeout: max(time.Millisecond, time.Until(deadline)),
+				})
+			if err != nil {
+				return err
+			}
+			current = member{
+				entry.To, entry.Status, entry.RequestID, entry.ErrorCode, entry.Raw,
+			}
+		}
+		members = append(members, current)
+	}
+	failed := 0
+	for _, current := range members {
+		if current.status == "failed" {
+			failed++
+		}
+	}
+	if args.flag("--json") {
+		printed := groupJSON{
+			RequestID: result.RequestID, To: result.To, Parts: result.Parts,
+			Status: result.Status, Messages: []json.RawMessage{},
+		}
+		for _, current := range members {
+			printed.Messages = append(printed.Messages, current.raw)
+		}
+		raw, err := json.Marshal(printed)
+		if err != nil {
+			return err
+		}
+		if err := a.printJSON(raw); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintf(a.Stdout, "Group %s: %d recipient(s), %d part(s) each\n",
+			result.RequestID, len(members), result.Parts)
+		for _, current := range members {
+			if current.status == "failed" {
+				cause := ""
+				if current.errorCode != nil {
+					cause = fmt.Sprintf(", error code %d", *current.errorCode)
+				}
+				fmt.Fprintf(a.Stdout, "  Failed: %s%s, requestId %s\n",
+					current.to, cause, current.requestID)
+				continue
+			}
+			fmt.Fprintf(a.Stdout, "  %s: %s, requestId %s\n",
+				capitalize(current.status), current.to, current.requestID)
+		}
+		if failed > 0 {
+			fmt.Fprintf(a.Stderr, "smsdock: %d of %d message(s) failed\n",
+				failed, len(members))
+		}
+	}
+	if failed > 0 {
 		return &exit{ExitAPIError}
 	}
 	return nil

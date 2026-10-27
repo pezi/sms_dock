@@ -121,6 +121,7 @@ events may arrive in between; match responses by `id`.
 | [`messages.list`](#messageslist) | Messages, filtered and paged |
 | [`messages.get`](#messagesget) | One message |
 | [`messages.send`](#messagessend) | Send an SMS |
+| [`messages.sendGroup`](#messagessendgroup) | Send one text to several numbers, one SMS each |
 | [`messages.status`](#messagesstatus) | State of a sent SMS |
 | [`messages.delete`](#messagesdelete) | Delete one message |
 | [`conversations.delete`](#conversationsdelete) | Delete a conversation |
@@ -203,6 +204,42 @@ Using it again for another recipient or text is answered with
 attempt failed: the answer then has the status `failed`. To try again, use a
 new `requestId`.
 
+### messages.sendGroup
+
+| Field | Type | Meaning |
+|---|---|---|
+| `to` | array of strings | 1 to 20 phone numbers, as in `messages.send`; repeated numbers are dropped |
+| `body` | string | Text, at most 10 SMS parts |
+| `sim` | integer, optional | Subscription id for every message; default is the phone's SMS SIM |
+| `requestId` | string, optional | Your own id of the group, 1–61 characters of `A-Z a-z 0-9 . _ -` |
+
+The result is a [GroupSendResult](#groupsendresult): the same text goes
+to every number as a separate SMS, and nobody sees the other recipients.
+Each member has its own request id, `<requestId>.<n>` counted from 1, and
+is followed like a single message: through the events and with
+`messages.status`. The group id itself has no outbox entry.
+
+The checks run for the whole group before the first SMS leaves. A number
+that is not a phone number (`invalid_number`, the message names it), a
+text that is too long, fewer messages left in the daily limit than the
+group has recipients (`quota_exceeded`), or more SMS parts than the 20 of
+one minute, parts × recipients (`invalid_request`), refuse the whole
+group. A refusal by the phone for one recipient does not stop the others:
+that member has the status `failed`, and the answer is still a success.
+
+**Sending exactly once** works as for `messages.send`: the same
+`requestId` with the same text and numbers answers with the stored
+members and their current status; with another text or other numbers it
+is an `invalid_request`.
+
+```json
+{"id":"4","action":"messages.sendGroup","to":["+4369912345678","+436641112223"],"body":"Meeting at 10.","requestId":"news-1"}
+```
+
+```json
+{"id":"4","ok":true,"result":{"requestId":"news-1","to":["+4369912345678","+436641112223"],"parts":1,"status":"queued","messages":[{"requestId":"news-1.1","to":"+4369912345678","parts":1,"status":"queued"},{"requestId":"news-1.2","to":"+436641112223","parts":1,"status":"queued"}]}}
+```
+
 ### messages.status
 
 | Field | Type | Meaning |
@@ -247,7 +284,7 @@ change.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `q` | string | | Search in names and numbers |
+| `q` | string | | Search in names and numbers; a number also matches its national or international form |
 | `limit` | integer 1–200 | 50 | Page size |
 | `cursor` | string | | `nextCursor` of the previous page |
 
@@ -411,6 +448,16 @@ are `null`, never left out.
 
 `to` is the number as it is sent, without the ignored characters.
 
+### GroupSendResult
+
+```json
+{"requestId":"news-1","to":["+4369912345678","+436641112223"],"parts":1,"status":"queued","messages":[{"requestId":"news-1.1","to":"+4369912345678","parts":1,"status":"queued"},{"requestId":"news-1.2","to":"+436641112223","parts":1,"status":"failed"}]}
+```
+
+`messages` holds one SendResult per recipient in the order of `to`.
+`status` is the least advanced status of the members (`queued`,
+`sending`, `sent`, `delivered`), or `failed` when every member failed.
+
 ### Outbox entry
 
 ```json
@@ -470,5 +517,6 @@ are `null`, never left out.
 | Clients | 8 |
 | Frames from the client | 20 per second per connection, counting every frame, also `authenticate` and unreadable ones |
 | Sending | 20 SMS parts per minute for the whole phone |
+| Group message | 20 recipients, and parts × recipients at most 20 |
 | Message length | 10 SMS parts (1530 plain or 670 Unicode characters) |
 | Page size | 200 |

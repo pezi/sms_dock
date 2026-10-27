@@ -104,6 +104,30 @@ public class ExamplesTests : ServerTestBase
     }
 
     [Fact]
+    public async Task SendGroupSms()
+    {
+        Server.RefuseNumber(Anna);
+        var (code, output, errors) = await RunAsync("SendGroupSms", true, Server.Url, "Hello all", Ben, Anna);
+        Assert.True(code == 1, errors);
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal("2 recipient(s), 1 part(s) each", lines[0]);
+        Assert.StartsWith($"{Ben}: sent, message id ", lines[1]);
+        Assert.Equal($"{Anna}: refused by the phone", lines[2]);
+        Assert.Equal(
+            [(Ben, "Hello all"), (Anna, "Hello all")],
+            Server.Sent.Select(sent => ((string?)sent["to"], (string?)sent["body"])));
+    }
+
+    [Fact]
+    public async Task SendGroupSmsRefused()
+    {
+        var (code, output, _) = await RunAsync("SendGroupSms", true, Server.Url, "Hello", Ben, "abc");
+        Assert.Equal(1, code);
+        Assert.StartsWith("Not sent: invalid_number", output);
+        Assert.Empty(Server.Sent);
+    }
+
+    [Fact]
     public async Task SendSmsRefused()
     {
         var (code, output, _) = await RunAsync("SendSms", true, Server.Url, "abc", "Hello");
@@ -123,6 +147,7 @@ public class ExamplesTests : ServerTestBase
     [Theory]
     [InlineData("ListMessages")]
     [InlineData("SendSms")]
+    [InlineData("SendGroupSms")]
     [InlineData("ListenIncoming")]
     [InlineData("AutoReply")]
     public async Task ExamplesExplainTheirUsage(string name)

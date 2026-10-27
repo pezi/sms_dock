@@ -197,6 +197,7 @@ func parse(commands []*command, words []string) (*arguments, error) {
 					"argument %s: not allowed with argument %s", name, other)
 			}
 		}
+		repeated := given[name]
 		given[name] = true
 		if found.kind == flag {
 			if hasInline {
@@ -229,6 +230,11 @@ func parse(commands []*command, words []string) (*arguments, error) {
 		value, problem := found.read(raw)
 		if problem != "" {
 			return nil, failure("argument %s: %s", name, problem)
+		}
+		if found.kind == list && repeated {
+			// A repeated list option adds to the words given before.
+			previous, _ := result.values[name].([]string)
+			value = append(append([]string{}, previous...), value.([]string)...)
 		}
 		result.values[name] = value
 	}
@@ -321,8 +327,9 @@ func (o *option) read(raw []string) (value any, problem string) {
 		}
 		return word, ""
 	case list:
+		// Without choices any words are taken.
 		for _, entry := range raw {
-			if !contains(o.choices, entry) {
+			if len(o.choices) > 0 && !contains(o.choices, entry) {
 				return nil, o.invalidChoice(entry)
 			}
 		}
@@ -568,6 +575,29 @@ func allCommands() []*command {
 					help: "your own id; the same id is sent only once"},
 				{name: "--wait", kind: flag,
 					help: "wait until the message was sent or failed"},
+				{name: "--wait-timeout", kind: float, metavar: "SECONDS",
+					initial: 60.0,
+					help:    "longest time to wait with --wait (default: 60)"},
+			},
+		}),
+		connected(command{
+			name: "send-group",
+			help: "send one text to several numbers, one SMS each",
+			description: "Send the same text to several numbers as separate " +
+				"SMS. Without --text the text is read from standard input.",
+			run: (*App).sendGroup,
+			options: []option{
+				{name: "--to", kind: list, metavar: "NUMBER", required: true,
+					help: "phone numbers of the recipients (at most 20); " +
+						"the option may be repeated"},
+				{name: "--text", kind: text, help: "text of the message"},
+				{name: "--sim", kind: integer, metavar: "ID",
+					help: "subscription id of the SIM"},
+				{name: "--request-id", kind: text, metavar: "ID",
+					help: "your own id of the group; the same id is sent " +
+						"only once"},
+				{name: "--wait", kind: flag,
+					help: "wait until every message was sent or failed"},
 				{name: "--wait-timeout", kind: float, metavar: "SECONDS",
 					initial: 60.0,
 					help:    "longest time to wait with --wait (default: 60)"},

@@ -36,6 +36,7 @@ export 'src/client.dart'
         eventNames,
         fingerprintEnv,
         maxFrameBytes,
+        maxGroupRecipients,
         maxPageSize,
         passwordEnv;
 export 'src/errors.dart'

@@ -249,6 +249,8 @@ class FakeSmsDock:
         self.outbox: dict[str, JsonObject] = {}
         self.fail_numbers: set[str] = set()
         self.sent: list[JsonObject] = []
+        #: Numbers the phone refuses at once (``send_refused``).
+        self.refuse_numbers: set[str] = set()
         """Messages handed to the (imaginary) radio, one entry per SMS."""
         self.requests: list[JsonObject] = []
         """Every request object received and not refused, in order."""
@@ -698,6 +700,8 @@ class FakeSmsDock:
             return handlers[action](request)
         if action == "messages.send":
             return await self._messages_send(request)
+        if action == "messages.sendGroup":
+            return await self._messages_send_group(request)
         if action == "subscribe":
             return self._subscribe(client, request)
         if action == "unsubscribe":
@@ -931,12 +935,27 @@ class FakeSmsDock:
                 )
             return {"requestId": known["requestId"], "to": known["to"],
                     "parts": known["parts"], "status": known["status"]}
-        if sim is None:
-            sim = next(s["subscriptionId"] for s in self.sims if s["isDefault"])
-        elif all(s["subscriptionId"] != sim for s in self.sims):
-            raise _Failure("sim_unavailable", f"No SIM with the subscription id {sim}.")
+        sim = self._subscription(sim)
         if request_id is None:
             request_id = uuid.uuid4().hex
+        entry = await self._accept(request_id, number, body, parts, sim)
+        return _send_result(entry)
+
+    def _subscription(self, sim: int | None) -> int:
+        """Return the SIM to send with; the default one without ``sim``."""
+
+        if sim is None:
+            return next(s["subscriptionId"] for s in self.sims if s["isDefault"])
+        if all(s["subscriptionId"] != sim for s in self.sims):
+            raise _Failure("sim_unavailable", f"No SIM with the subscription id {sim}.")
+        return sim
+
+    async def _accept(
+        self, request_id: str, number: str, body: str, parts: int, sim: int,
+        group: str | None = None,
+    ) -> JsonObject:
+        """Queue one message that passed the checks and start sending it."""
+
         entry = {
             "requestId": request_id, "to": number, "parts": parts,
             "partsSent": 0, "status": "queued", "errorCode": None,
@@ -945,15 +964,103 @@ class FakeSmsDock:
         }
         self.outbox[request_id] = entry
         self._bodies[request_id] = body
-        self.sent.append({"requestId": request_id, "to": number,
-                          "body": body, "sim": sim})
+        sent = {"requestId": request_id, "to": number, "body": body, "sim": sim}
+        if group is not None:
+            sent["group"] = group
+        self.sent.append(sent)
         await self._emit("sms.queued", {
             "requestId": request_id, "to": number, "parts": parts,
             "sim": sim, "source": "api",
         })
+        if number in self.refuse_numbers:
+            # The phone did not even take the message.
+            entry.update(status="failed", errorCode=None)
+            await self._emit("sms.failed", {
+                "requestId": request_id, "id": None, "conversationId": None,
+                "to": number, "errorCode": None, "reason": "send_refused",
+            })
+            return entry
         self._spawn(self._transmit(entry, body))
-        return {"requestId": request_id, "to": number, "parts": parts,
-                "status": "queued"}
+        return entry
+
+    async def _messages_send_group(self, request: JsonObject) -> JsonObject:
+        to = _required(request, "to", list)
+        body = _required(request, "body", str)
+        sim = _optional(request, "sim", int)
+        request_id = _optional(request, "requestId", str)
+        if not to:
+            raise _Failure("invalid_request", "'to' is missing.")
+        if any(not isinstance(item, str) for item in to):
+            raise _Failure("invalid_request", "'to' must contain strings.")
+        numbers: list[str] = []
+        for item in to:
+            number = normalize_number(item)
+            if not _NUMBER.fullmatch(number):
+                raise _Failure(
+                    "invalid_number",
+                    f"'to' contains '{item}', which is not a phone number.",
+                )
+            if not any(same_peer(known, number) for known in numbers):
+                numbers.append(number)
+        if len(numbers) > 20:
+            raise _Failure(
+                "invalid_request", "A group message goes to at most 20 recipients.",
+            )
+        if not body:
+            raise _Failure("invalid_request", "'body' is empty.")
+        parts = count_parts(body)
+        if parts > 10:
+            raise _Failure(
+                "message_too_long",
+                f"The message needs {parts} SMS parts; at most 10 are allowed.",
+            )
+        if request_id is not None and (
+            not _REQUEST_ID.fullmatch(request_id) or len(request_id) > 61
+        ):
+            raise _Failure(
+                "invalid_request",
+                "'requestId' of a group must be 1 to 61 characters of "
+                "A-Z a-z 0-9 . _ -.",
+            )
+        if request_id is None:
+            request_id = uuid.uuid4().hex
+        known = self._known_group(request_id)
+        if known:
+            same = len(known) == len(numbers) and all(
+                self._bodies[m["requestId"]] == body for m in known
+            ) and all(
+                any(same_peer(m["to"], number) for m in known) for number in numbers
+            )
+            if not same:
+                raise _Failure(
+                    "invalid_request",
+                    "'requestId' was already used for another message.",
+                )
+            return _group_result(request_id, known)
+        total = parts * len(numbers)
+        if total > 20:
+            raise _Failure(
+                "invalid_request",
+                f"This group needs {total} SMS parts; at most 20 can be sent "
+                "per minute. Send to fewer recipients or shorten the text.",
+            )
+        sim = self._subscription(sim)
+        members = [
+            await self._accept(f"{request_id}.{index + 1}", number, body, parts,
+                               sim, request_id)
+            for index, number in enumerate(numbers)
+        ]
+        return _group_result(request_id, members)
+
+    def _known_group(self, request_id: str) -> list[JsonObject]:
+        """Return the members of a group sent before, oldest first."""
+
+        members: list[JsonObject] = []
+        index = 1
+        while f"{request_id}.{index}" in self.outbox:
+            members.append(self.outbox[f"{request_id}.{index}"])
+            index += 1
+        return members
 
     async def _transmit(self, entry: JsonObject, body: str) -> None:
         number = entry["to"]
@@ -1057,6 +1164,28 @@ class FakeSmsDock:
             })
         items.sort(key=lambda c: (c["timestamp"], c["id"]), reverse=True)
         return items
+
+
+_STATUS_ORDER = ["queued", "sending", "sent", "delivered"]
+
+
+def _send_result(entry: JsonObject) -> JsonObject:
+    return {"requestId": entry["requestId"], "to": entry["to"],
+            "parts": entry["parts"], "status": entry["status"]}
+
+
+def _group_result(request_id: str, members: list[JsonObject]) -> JsonObject:
+    """Return the GroupSendResult of ``members`` as the app builds it."""
+
+    alive = [m["status"] for m in members if m["status"] != "failed"]
+    status = min(alive, key=_STATUS_ORDER.index) if alive else "failed"
+    return {
+        "requestId": request_id,
+        "to": [m["to"] for m in members],
+        "parts": members[0]["parts"],
+        "status": status,
+        "messages": [_send_result(m) for m in members],
+    }
 
 
 def _required(request: JsonObject, name: str, kind: type) -> Any:

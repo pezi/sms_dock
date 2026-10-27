@@ -449,6 +449,95 @@ fn send() {
 }
 
 #[test]
+fn send_group() {
+    let server = FakeServer::new();
+    let options = [
+        "--to",
+        BEN,
+        "--to",
+        ANNA,
+        "--text",
+        "Hello all",
+        "--request-id",
+        "news-1",
+        "--sim",
+        "2",
+    ];
+    let run = Cli::to(&server, "send-group", &options).run();
+    assert_eq!(run.code, 0, "{}", run.err);
+    assert_eq!(
+        run.out,
+        format!(
+            "Group news-1: 2 recipient(s), 1 part(s) each\n  Queued: {BEN}, requestId news-1.1\n  \
+             Queued: {ANNA}, requestId news-1.2\n"
+        )
+    );
+    let sent = server.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!((&sent[0]["to"], &sent[0]["sim"]), (&json!(BEN), &json!(2)));
+    assert_eq!(
+        (&sent[1]["to"], &sent[1]["body"]),
+        (&json!(ANNA), &json!("Hello all"))
+    );
+}
+
+#[test]
+fn send_group_and_wait() {
+    let server = FakeServer::new();
+    server.state().fail_numbers.insert(ANNA.to_owned());
+    let options = [
+        "--to",
+        BEN,
+        "--to",
+        ANNA,
+        "--text",
+        "Hello all",
+        "--request-id",
+        "news-2",
+        "--wait",
+    ];
+    let run = Cli::to(&server, "send-group", &options).run();
+    assert_eq!(run.code, 1);
+    assert_eq!(
+        run.out,
+        format!(
+            "Group news-2: 2 recipient(s), 1 part(s) each\n  Sent: {BEN}, requestId news-2.1\n  \
+             Failed: {ANNA}, error code 1, requestId news-2.2\n"
+        )
+    );
+    assert_eq!(run.err, "smsdock: 1 of 2 message(s) failed\n");
+}
+
+#[test]
+fn send_group_json() {
+    let server = FakeServer::new();
+    let options = [
+        "--to",
+        BEN,
+        "--text",
+        "Hello",
+        "--request-id",
+        "news-3",
+        "--json",
+    ];
+    let run = Cli::to(&server, "send-group", &options).run();
+    assert_eq!(run.code, 0, "{}", run.err);
+    assert_eq!(
+        run.json(),
+        json!({
+            "requestId": "news-3", "to": [BEN], "parts": 1, "status": "queued",
+            "messages": [
+                {"requestId": "news-3.1", "to": BEN, "parts": 1, "status": "queued"},
+            ],
+        })
+    );
+    let options = ["--to", BEN, "--text", "Hello", "--wait", "--json"];
+    let run = Cli::to(&server, "send-group", &options).run();
+    assert_eq!(run.code, 0, "{}", run.err);
+    assert_eq!(run.json()["messages"][0]["partsSent"], json!(1));
+}
+
+#[test]
 fn send_from_standard_input() {
     let server = FakeServer::new();
     let options = [

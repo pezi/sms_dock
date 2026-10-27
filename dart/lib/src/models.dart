@@ -207,6 +207,32 @@ extension type SendResult(JsonObject json) implements JsonObject {
   String get status => json['status'] as String;
 }
 
+/// Result of `messages.sendGroup`: one SMS per recipient.
+///
+/// [messages] holds one [SendResult] per recipient in the order of [to],
+/// with the request ids `<requestId>.1`, `<requestId>.2` and so on.
+/// [status] is the least advanced status of the members, or `failed` when
+/// every member failed.
+extension type GroupSendResult(JsonObject json) implements JsonObject {
+  /// The id that names the group.
+  String get requestId => json['requestId'] as String;
+
+  /// The numbers as they are sent, in the order of [messages].
+  List<String> get to => (json['to'] as List<dynamic>).cast<String>();
+
+  /// Number of SMS parts of the text, the same for every recipient.
+  int get parts => json['parts'] as int;
+
+  /// Status of the group.
+  String get status => json['status'] as String;
+
+  /// One result per recipient.
+  List<SendResult> get messages => [
+    for (final member in json['messages'] as List<dynamic>)
+      SendResult(member as JsonObject),
+  ];
+}
+
 /// State of a message sent through SMS Dock.
 ///
 /// [status] is `queued` (handed to the phone), `sending` (some parts are

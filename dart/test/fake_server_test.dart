@@ -279,9 +279,7 @@ void main() {
     }
 
     test('errors', () async {
-      final wire = await Wire.open(
-        await startServer(requestsPerSecond: 1000),
-      );
+      final wire = await Wire.open(await startServer(requestsPerSecond: 1000));
       await wire.login();
       final cases = <(JsonObject, String)>[
         ({'action': 'unknown'}, 'unknown_action'),
@@ -309,7 +307,7 @@ void main() {
             'action': 'messages.send',
             'to': anna,
             'body': 'x',
-            'requestId': 'a b'
+            'requestId': 'a b',
           },
           'invalid_request',
         ),

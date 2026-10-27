@@ -97,6 +97,7 @@ smsdock <command> <wss-url> [options]
 | `conversations` | List conversations, newest first |
 | `messages` | List messages, newest first |
 | `send` | Send an SMS |
+| `send-group` | Send one text to several numbers, one SMS each |
 | `delete` | Delete a message or a conversation |
 | `mark-read` | Mark a conversation as read |
 | `contacts` | List the contacts of the phone |
@@ -236,6 +237,30 @@ The second run sends nothing and prints the status of the first message,
 for example `Sent: …`. If the first message failed, the second run fails
 too (exit code 1); use a new id to try again. The same id with another
 number or text is an error (`invalid_request`).
+
+### send-group
+
+```bash
+smsdock send-group wss://192.168.1.50:9443/ws \
+  --to +4369912345678 +436641112223 --text 'Meeting at 10.'
+```
+
+```
+Group 3f9c…: 2 recipient(s), 1 part(s) each
+  Queued: +4369912345678, requestId 3f9c….1
+  Queued: +436641112223, requestId 3f9c….2
+```
+
+The same text goes to every number as a separate SMS; nobody sees the
+other recipients. The options are those of `send`, with `--to` taking
+several numbers (at most 20). The phone checks the whole group before it
+sends anything: a bad number, a text that is too long, fewer messages
+left in the daily limit than recipients, or more than 20 SMS parts in
+total (parts × recipients) refuse the group. A recipient the phone
+refuses afterwards is printed as `Failed`; the others are sent. With
+`--wait` the command waits for every message and ends with exit code 1
+if any of them failed. `--request-id` names the group; the members get
+the ids `ID.1`, `ID.2` and so on, which `--json` prints.
 
 ### delete
 
@@ -398,6 +423,7 @@ is a `Map<String, Object>`, an array a `List<Object>`, an integer a `Long`,
 | `messages()`, `messages(filter, limit)`, `messages(filter, limit, cursor)` | Page of Message |
 | `iterMessages(filter)`, `(filter, pageSize)`, `(filter, pageSize, maxItems)` | `Iterable` of Message; same filters as `messages` |
 | `getMessage(messageId)` | Message |
+| `sendGroup(to, body)`, `sendGroup(to, body, sim, requestId)` | GroupSendResult: one SMS per number in the list `to`, at most 20 |
 | `send(to, body)`, `send(to, body, sim, requestId)` | SendResult |
 | `messageStatus(requestId)` | Outbox entry |
 | `waitForResult(requestId)`, `(requestId, timeout)`, `(requestId, timeout, delivered, pollInterval)` | Outbox entry with the status `sent`, `delivered` or `failed` |
@@ -494,6 +520,35 @@ stands for one message: using it for another recipient or text raises
 
 The status of a message is `queued` (handed to the phone), `sending`
 (some parts are left), `sent`, `delivered` or `failed`.
+
+### One text to several numbers
+
+`sendGroup()` sends the same text to every number of a list as separate
+SMS. The result names the group and holds one SendResult per recipient
+in `messages`; their request ids are `<requestId>.1`, `<requestId>.2`
+and so on, and `waitForResult()` and `messageStatus()` take them like
+those of single messages.
+
+```java
+Map<String, Object> result = dock.sendGroup(
+    List.of("+4369912345678", "+436641112223"), "Meeting at 10.", null, "meeting-1");
+for (Object item : (List<?>) result.get("messages")) {
+    Map<?, ?> member = (Map<?, ?>) item;
+    if ("failed".equals(member.get("status"))) {   // the phone refused this one at once
+        System.out.println(member.get("to") + " refused");
+        continue;
+    }
+    Map<String, Object> outcome = dock.waitForResult((String) member.get("requestId"));
+    System.out.println(member.get("to") + " " + outcome.get("status"));
+}
+```
+
+The phone checks the whole group before the first SMS leaves: a number
+that is not a phone number, a text that is too long, fewer messages left
+in the daily limit of the free version than the group has recipients, or
+more SMS parts than the 20 of one minute (parts × recipients) throw
+`ApiException` and nothing is sent. A `requestId` of a group has at most
+61 characters and makes the group safe to repeat, as for `send()`.
 
 ### Events and hooks
 
@@ -689,7 +744,7 @@ try (SmsDockClient dock = new SmsDockClient("wss://192.168.1.50:9443/ws").connec
 
 ## Examples
 
-The directory [examples/](examples) contains four short programs. Each
+The directory [examples/](examples) contains five short programs. Each
 takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 `SMSDOCK_FINGERPRINT`.
 
@@ -697,6 +752,7 @@ takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 | --- | --- |
 | [ListMessages.java](examples/ListMessages.java) | The last 10 incoming SMS |
 | [SendSms.java](examples/SendSms.java) | Send one SMS and wait for the result |
+| [SendGroupSms.java](examples/SendGroupSms.java) | Send one text to several numbers, one SMS each, and wait for every result |
 | [ListenIncoming.java](examples/ListenIncoming.java) | Hook: call a method for every incoming SMS, also for those that arrived while the connection was down |
 | [AutoReply.java](examples/AutoReply.java) | Hook that answers incoming SMS, with guards against reply loops |
 
@@ -706,6 +762,7 @@ class path:
 ```bash
 java -cp target/smsdock.jar examples/ListMessages.java wss://192.168.1.50:9443/ws
 java -cp target/smsdock.jar examples/SendSms.java wss://192.168.1.50:9443/ws +4369912345678 'Hello'
+java -cp target/smsdock.jar examples/SendGroupSms.java wss://192.168.1.50:9443/ws 'Hello all' +4369912345678 +436641112223
 java -cp target/smsdock.jar examples/ListenIncoming.java wss://192.168.1.50:9443/ws
 java -cp target/smsdock.jar examples/AutoReply.java wss://192.168.1.50:9443/ws
 ```

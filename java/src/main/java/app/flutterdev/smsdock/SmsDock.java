@@ -32,6 +32,9 @@ public final class SmsDock {
     /** Largest value of {@code limit}. */
     public static final int MAX_PAGE_SIZE = 200;
 
+    /** Recipients of one group message at most. */
+    public static final int MAX_GROUP_RECIPIENTS = 20;
+
     /** Environment variable that holds the password. */
     public static final String PASSWORD_ENV = "SMSDOCK_PASSWORD";
 

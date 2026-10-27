@@ -49,6 +49,8 @@ import java.util.regex.Pattern;
 public final class SmsDockClient implements AutoCloseable {
 
     private static final Pattern REQUEST_ID_PATTERN = Pattern.compile("[A-Za-z0-9._-]{1,64}");
+    private static final Pattern GROUP_REQUEST_ID_PATTERN =
+        Pattern.compile("[A-Za-z0-9._-]{1,61}");
     private static final int MAX_BACKOFF_EXPONENT = 16;
     private static final long FIRST_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(100);
     private static final long MAX_NANOS = Long.MAX_VALUE / 4;
@@ -921,6 +923,81 @@ public final class SmsDockClient implements AutoCloseable {
             parameters.put("sim", sim);
         }
         return request("messages.send", parameters);
+    }
+
+    /**
+     * Sends one text to several numbers on the SMS SIM of the phone, with a random
+     * {@code requestId}; see {@link #sendGroup(List, String, Long, String)}.
+     *
+     * @param to 1 to 20 phone numbers
+     * @param body the text, at most 10 SMS parts
+     * @return the GroupSendResult: {@code {"requestId", "to", "parts", "status", "messages"}}
+     */
+    public Map<String, Object> sendGroup(List<String> to, String body) {
+        return sendGroup(to, body, null, null);
+    }
+
+    /**
+     * Sends one text to several numbers, one SMS each, and returns the GroupSendResult.
+     *
+     * <p>Every recipient gets a separate SMS and does not see the others; repeated numbers
+     * are sent once. The result holds one SendResult per recipient in {@code messages},
+     * in the order of {@code to}. Their request ids are {@code <requestId>.1},
+     * {@code <requestId>.2} and so on; {@link #waitForResult} and {@link #messageStatus}
+     * take them like those of single messages. {@code status} is the least advanced status
+     * of the members, or {@code failed} when every member failed.
+     *
+     * <p>The phone checks the whole group before it sends anything: a number that is not a
+     * phone number ({@code invalid_number}), a text that is too long, fewer messages left in
+     * the daily limit of the free version than the group has recipients
+     * ({@code quota_exceeded}) or more SMS parts than the 20 of one minute, parts times
+     * recipients ({@code invalid_request}), refuse the whole group. A refusal by the phone
+     * for one recipient does not stop the others; that member has the status
+     * {@code failed}.
+     *
+     * <p>{@code requestId} works as for {@link #send(String, String, Long, String)}, for the
+     * whole group: the same id with the same text and numbers is not sent again but answered
+     * with the stored members and their current status.
+     *
+     * @param to 1 to 20 phone numbers
+     * @param body the text, at most 10 SMS parts
+     * @param sim subscription id of the SIM; {@code null} for the SMS SIM of the phone
+     * @param requestId your own id of the group, 1 to 61 characters of
+     *     {@code A-Z a-z 0-9 . _ -}; {@code null} for a random one
+     * @return the GroupSendResult: {@code {"requestId", "to", "parts", "status", "messages"}}
+     */
+    public Map<String, Object> sendGroup(List<String> to, String body, Long sim,
+            String requestId) {
+        if (to == null || to.isEmpty()) {
+            throw new IllegalArgumentException("'to' must be a list of phone numbers");
+        }
+        for (String number : to) {
+            if (number == null || number.isBlank()) {
+                throw new IllegalArgumentException("'to' must be a list of phone numbers");
+            }
+        }
+        if (to.size() > SmsDock.MAX_GROUP_RECIPIENTS) {
+            throw new IllegalArgumentException(
+                "'to' holds more than " + SmsDock.MAX_GROUP_RECIPIENTS + " numbers");
+        }
+        if (body == null || body.isEmpty()) {
+            throw new IllegalArgumentException("'body' must be a text");
+        }
+        String identifier = requestId;
+        if (identifier == null) {
+            identifier = UUID.randomUUID().toString().replace("-", "");
+        } else if (!GROUP_REQUEST_ID_PATTERN.matcher(identifier).matches()) {
+            throw new IllegalArgumentException(
+                "requestId of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -");
+        }
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put("to", new ArrayList<>(to));
+        parameters.put("body", body);
+        parameters.put("requestId", identifier);
+        if (sim != null) {
+            parameters.put("sim", sim);
+        }
+        return request("messages.sendGroup", parameters);
     }
 
     /**

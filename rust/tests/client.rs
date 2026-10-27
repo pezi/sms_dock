@@ -836,6 +836,186 @@ fn status_of_a_long_message() {
 }
 
 #[test]
+fn send_group() {
+    let server = FakeServer::new();
+    let mut client = connect(&server);
+    let result = client
+        .send_group(
+            &["+43 690 876-54321", ANNA, BEN],
+            "Hello all",
+            Some(2),
+            Some("news-1"),
+        )
+        .unwrap();
+    assert_eq!(result.request_id, "news-1");
+    assert_eq!(result.to, [BEN, ANNA]);
+    assert_eq!((result.parts, result.status.as_str()), (1, "queued"));
+    let members: Vec<(&str, &str, i64, &str)> = result
+        .messages
+        .iter()
+        .map(|m| {
+            (
+                m.request_id.as_str(),
+                m.to.as_str(),
+                m.parts,
+                m.status.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        members,
+        [
+            ("news-1.1", BEN, 1, "queued"),
+            ("news-1.2", ANNA, 1, "queued")
+        ]
+    );
+    assert_eq!(result.failed_count(), 0);
+    assert_eq!(
+        server.last_request("messages.sendGroup"),
+        json!({
+            "id": "rs-2", "action": "messages.sendGroup",
+            "to": ["+43 690 876-54321", ANNA, BEN], "body": "Hello all",
+            "requestId": "news-1", "sim": 2,
+        })
+    );
+    assert_eq!(
+        server.sent(),
+        [
+            json!({"requestId": "news-1.1", "to": BEN, "body": "Hello all", "sim": 2, "group": "news-1"}),
+            json!({"requestId": "news-1.2", "to": ANNA, "body": "Hello all", "sim": 2, "group": "news-1"}),
+        ]
+    );
+    assert_eq!(
+        client.wait_for_result("news-1.2", secs(5)).unwrap().status,
+        "sent"
+    );
+    assert_eq!(client.message_status("news-1.1").unwrap().to, BEN);
+    assert_eq!(code(client.message_status("news-1")), "not_found");
+}
+
+#[test]
+fn send_group_creates_a_request_id() {
+    let server = FakeServer::new();
+    let mut client = connect(&server);
+    let result = client.send_group(&[BEN], "one", None, None).unwrap();
+    assert_eq!(result.request_id.len(), 32);
+    assert!(result
+        .request_id
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
+        result.messages[0].request_id,
+        format!("{}.1", result.request_id)
+    );
+}
+
+#[test]
+fn send_group_repeats_only_once() {
+    let server = FakeServer::new();
+    let mut client = connect(&server);
+    let first = client
+        .send_group(&[BEN, ANNA], "Same", None, Some("news-2"))
+        .unwrap();
+    let again = client
+        .send_group(&["0690/876.54.321", ANNA], "Same", None, Some("news-2"))
+        .unwrap();
+    assert_eq!(again, first);
+    assert_eq!(server.sent().len(), 2);
+    assert_eq!(
+        client.wait_for_result("news-2.1", secs(5)).unwrap().status,
+        "sent"
+    );
+    let later = client
+        .send_group(&[ANNA, BEN], "Same", None, Some("news-2"))
+        .unwrap();
+    assert!(["sent", "delivered"].contains(&later.messages[0].status.as_str()));
+    assert_eq!(
+        later
+            .messages
+            .iter()
+            .map(|m| m.request_id.as_str())
+            .collect::<Vec<_>>(),
+        ["news-2.1", "news-2.2"]
+    );
+    for (to, body) in [(&[BEN, ANNA][..], "Other"), (&[BEN][..], "Same")] {
+        assert_eq!(
+            code(client.send_group(to, body, None, Some("news-2"))),
+            "invalid_request"
+        );
+    }
+    assert_eq!(server.sent().len(), 2);
+}
+
+#[test]
+fn send_group_refuses_the_whole_group() {
+    let server = FakeServer::new();
+    let mut client = connect(&server);
+    let long = "x".repeat(1531);
+    let seven_parts = "x".repeat(1000);
+    let cases: [(&[&str], &str, &str); 3] = [
+        (&[BEN, "abc"], "Hello", "invalid_number"),
+        (&[BEN, ANNA], long.as_str(), "message_too_long"),
+        (
+            &[BEN, ANNA, "+43123456789"],
+            seven_parts.as_str(),
+            "invalid_request",
+        ),
+    ];
+    for (to, body, expected) in cases {
+        assert_eq!(code(client.send_group(to, body, None, None)), expected);
+    }
+    assert!(server.sent().is_empty());
+}
+
+#[test]
+fn send_group_goes_on_after_a_refused_member() {
+    let server = FakeServer::new();
+    let mut client = connect(&server);
+    server.state().refuse_numbers.insert(ANNA.to_owned());
+    let result = client
+        .send_group(&[BEN, ANNA], "Hello", None, Some("news-3"))
+        .unwrap();
+    let statuses: Vec<&str> = result.messages.iter().map(|m| m.status.as_str()).collect();
+    assert_eq!(statuses, ["queued", "failed"]);
+    assert_eq!(result.status, "queued");
+    assert_eq!(result.failed_count(), 1);
+    assert_eq!(
+        client.wait_for_result("news-3.1", secs(5)).unwrap().status,
+        "sent"
+    );
+    assert_eq!(client.message_status("news-3.2").unwrap().status, "failed");
+    server.state().refuse_numbers.insert(BEN.to_owned());
+    let all = client
+        .send_group(&[BEN, ANNA], "Hello", None, Some("news-4"))
+        .unwrap();
+    assert_eq!(all.status, "failed");
+}
+
+#[test]
+fn send_group_refuses_bad_values() {
+    let server = FakeServer::new();
+    let mut client = connect(&server);
+    let many: Vec<String> = (0..21).map(|i| format!("+4369900000{i:02}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let cases: [(&[&str], &str, Option<&str>); 6] = [
+        (&[], "Hello", None),
+        (&[BEN, " "], "Hello", None),
+        (&[BEN], "", None),
+        (&[BEN], "Hello", Some("has space")),
+        (&[BEN], "Hello", Some("x".repeat(62).leak())),
+        (many.as_slice(), "Hello", None),
+    ];
+    for (to, body, request_id) in cases {
+        assert!(
+            is_invalid(&client.send_group(to, body, None, request_id)),
+            "{to:?} {body:?} {request_id:?}"
+        );
+    }
+    assert!(server.sent().is_empty());
+    assert_eq!(server.actions(), ["authenticate"]);
+}
+
+#[test]
 fn send_refuses_empty_values_and_malformed_request_ids() {
     let server = FakeServer::new();
     let mut client = connect(&server);

@@ -319,6 +319,7 @@ internal sealed partial class SmsDockCli(CliEnvironment environment)
                 "conversations" => await ConversationsAsync(client, parsed, cancellationToken).ConfigureAwait(false),
                 "messages" => await MessagesAsync(client, parsed, cancellationToken).ConfigureAwait(false),
                 "send" => await SendAsync(client, parsed, cancellationToken).ConfigureAwait(false),
+                "send-group" => await SendGroupAsync(client, parsed, cancellationToken).ConfigureAwait(false),
                 "delete" => await DeleteAsync(client, parsed, cancellationToken).ConfigureAwait(false),
                 "mark-read" => await MarkReadAsync(client, parsed, cancellationToken).ConfigureAwait(false),
                 "contacts" => await ContactsAsync(client, parsed, cancellationToken).ConfigureAwait(false),
@@ -511,8 +512,8 @@ internal sealed partial class SmsDockCli(CliEnvironment environment)
         return ExitOk;
     }
 
-    private async Task<int> SendAsync(
-        SmsDockClient client, ParsedArguments args, CancellationToken cancellationToken)
+    /// <summary>Returns the text to send: <c>--text</c> or standard input.</summary>
+    private async Task<string> TextOfAsync(ParsedArguments args, CancellationToken cancellationToken)
     {
         var text = args.Text("text");
         if (text is null)
@@ -532,6 +533,13 @@ internal sealed partial class SmsDockCli(CliEnvironment environment)
         {
             throw new UsageException("The text is empty.");
         }
+        return text;
+    }
+
+    private async Task<int> SendAsync(
+        SmsDockClient client, ParsedArguments args, CancellationToken cancellationToken)
+    {
+        var text = await TextOfAsync(args, cancellationToken).ConfigureAwait(false);
         JsonObject result = (await client.SendAsync(
             args.Text("to")!, text, args.Integer("sim"), args.Text("request-id"), cancellationToken)
             .ConfigureAwait(false)).Json;
@@ -563,6 +571,69 @@ internal sealed partial class SmsDockCli(CliEnvironment environment)
         }
         return failed ? ExitApiError : ExitOk;
     }
+
+    private async Task<int> SendGroupAsync(
+        SmsDockClient client, ParsedArguments args, CancellationToken cancellationToken)
+    {
+        var text = await TextOfAsync(args, cancellationToken).ConfigureAwait(false);
+        var numbers = (List<string>)args.Values["to"];
+        var result = (await client.SendGroupAsync(
+            numbers, text, args.Integer("sim"), args.Text("request-id"), cancellationToken)
+            .ConfigureAwait(false)).Json;
+        var members = ((JsonArray)result["messages"]!).Select(member => (JsonObject)member!).ToList();
+        if (args.Flag("wait"))
+        {
+            var timeout = Seconds(args.Number("wait-timeout") ?? 60.0);
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            var waited = new List<JsonObject>();
+            foreach (var member in members)
+            {
+                if (PyText.AsString(member["status"]) == "failed")
+                {
+                    waited.Add(member);
+                    continue;
+                }
+                var remaining = timeout - started.Elapsed;
+                waited.Add((await client.WaitForResultAsync(
+                    PyText.Str(member["requestId"]),
+                    remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero,
+                    cancellationToken: cancellationToken).ConfigureAwait(false)).Json);
+            }
+            members = waited;
+            result["messages"] = new JsonArray([.. members.Select(Copy)]);
+        }
+        var failed = members.Count(member => PyText.AsString(member["status"]) == "failed");
+        if (args.Flag("json"))
+        {
+            PrintJson(result);
+            return failed > 0 ? ExitApiError : ExitOk;
+        }
+        PrintLine(
+            $"Group {PyText.Str(result["requestId"])}: {members.Count} recipient(s), "
+            + $"{PyText.Str(result["parts"])} part(s) each");
+        foreach (var member in members)
+        {
+            if (PyText.AsString(member["status"]) == "failed")
+            {
+                var cause = member["errorCode"] is null ? "" : $", error code {PyText.Str(member["errorCode"])}";
+                PrintLine(
+                    $"  Failed: {PyText.Str(member["to"])}{cause}, requestId {PyText.Str(member["requestId"])}");
+            }
+            else
+            {
+                PrintLine(
+                    $"  {Capitalize(PyText.Str(member["status"]))}: {PyText.Str(member["to"])}, "
+                    + $"requestId {PyText.Str(member["requestId"])}");
+            }
+        }
+        if (failed > 0)
+        {
+            _error.Write($"smsdock: {failed} of {members.Count} message(s) failed\n");
+        }
+        return failed > 0 ? ExitApiError : ExitOk;
+    }
+
+    private static JsonNode Copy(JsonObject value) => JsonNode.Parse(value.ToJsonString())!;
 
     private async Task<int> DeleteAsync(
         SmsDockClient client, ParsedArguments args, CancellationToken cancellationToken)

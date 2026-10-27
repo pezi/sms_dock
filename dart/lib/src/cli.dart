@@ -87,13 +87,13 @@ class CliIo {
     Future<String> Function()? readInput,
     Future<String?> Function(String prompt)? readPassword,
     Stream<void> Function()? interrupts,
-  })  : out = out ?? stdout,
-        err = err ?? stderr,
-        environment = environment ?? Platform.environment,
-        inputIsTerminal = inputIsTerminal ?? _inputIsTerminal,
-        readInput = readInput ?? _readStandardInput,
-        readPassword = readPassword ?? _promptHidden,
-        interrupts = interrupts ?? ProcessSignal.sigint.watch;
+  }) : out = out ?? stdout,
+       err = err ?? stderr,
+       environment = environment ?? Platform.environment,
+       inputIsTerminal = inputIsTerminal ?? _inputIsTerminal,
+       readInput = readInput ?? _readStandardInput,
+       readPassword = readPassword ?? _promptHidden,
+       interrupts = interrupts ?? ProcessSignal.sigint.watch;
 
   /// Standard output.
   final StringSink out;
@@ -235,7 +235,8 @@ const List<_Command> _commands = [
   _Command(
     'fingerprint',
     'print the certificate fingerprint of a server',
-    description: 'Print the SHA-256 fingerprint of the certificate the server '
+    description:
+        'Print the SHA-256 fingerprint of the certificate the server '
         'presents. Compare it with the Server screen of the app before '
         'you use it.',
     argumentName: 'host',
@@ -263,12 +264,7 @@ const List<_Command> _commands = [
         metavar: 'TEXT',
       ),
       _Option('unread', 'only conversations with unread messages', flag: true),
-      _Option(
-        'sim',
-        'only this subscription id',
-        metavar: 'ID',
-        convert: _int,
-      ),
+      _Option('sim', 'only this subscription id', metavar: 'ID', convert: _int),
       _Option(
         'limit',
         'number of conversations (default: 50)',
@@ -314,12 +310,7 @@ const List<_Command> _commands = [
         convert: _timestamp,
       ),
       _Option('unread', 'only unread messages', flag: true),
-      _Option(
-        'sim',
-        'only this subscription id',
-        metavar: 'ID',
-        convert: _int,
-      ),
+      _Option('sim', 'only this subscription id', metavar: 'ID', convert: _int),
       _Option(
         'limit',
         'number of messages (default: 50)',
@@ -364,6 +355,47 @@ const List<_Command> _commands = [
       ),
     ],
     run: _send,
+  ),
+  _Command(
+    'send-group',
+    'send one text to several numbers, one SMS each',
+    description:
+        'Send the same text to several numbers as separate SMS. Without '
+        '--text the text is read from standard input.',
+    options: [
+      _Option(
+        'to',
+        'phone numbers of the recipients (at most 20)',
+        metavar: 'NUMBER',
+        several: true,
+        required: true,
+      ),
+      _Option('text', 'text of the message', metavar: 'TEXT'),
+      _Option(
+        'sim',
+        'subscription id of the SIM',
+        metavar: 'ID',
+        convert: _int,
+      ),
+      _Option(
+        'request-id',
+        'your own id of the group; the same id is sent only once',
+        metavar: 'ID',
+      ),
+      _Option(
+        'wait',
+        'wait until every message was sent or failed',
+        flag: true,
+      ),
+      _Option(
+        'wait-timeout',
+        'longest time to wait with --wait (default: 60)',
+        metavar: 'SECONDS',
+        convert: _float,
+        fallback: 60.0,
+      ),
+    ],
+    run: _sendGroup,
   ),
   _Command(
     'delete',
@@ -417,11 +449,7 @@ const List<_Command> _commands = [
     'print incoming SMS as they arrive',
     description: 'Print events as they arrive until Ctrl+C.',
     options: [
-      _Option(
-        'address',
-        'only SMS events of this number',
-        metavar: 'NUMBER',
-      ),
+      _Option('address', 'only SMS events of this number', metavar: 'NUMBER'),
       _Option(
         'events',
         'events to print (default: sms.received); * means all',
@@ -494,8 +522,8 @@ String _usageLine(_Command? command) {
           first
               ? '($text |'
               : last
-                  ? '$text)'
-                  : '$text |',
+              ? '$text)'
+              : '$text |',
         );
       } else {
         optional.add(option.required ? text : '[$text]');
@@ -589,8 +617,9 @@ String _commandHelp(_Command command) {
     _helpOption,
     for (final option in options) option.invocation,
   ].map((text) => text.length + 2).reduce((a, b) => a > b ? a : b);
-  final position =
-      longest + 2 < _maxHelpPosition ? longest + 2 : _maxHelpPosition;
+  final position = longest + 2 < _maxHelpPosition
+      ? longest + 2
+      : _maxHelpPosition;
   final description = command.description;
   final lines = [
     _usageLine(command),
@@ -803,8 +832,8 @@ Map<String, Object?> _parseCommand(
       option.name: seen.containsKey(option.name)
           ? seen[option.name]
           : option.flag
-              ? false
-              : option.fallback,
+          ? false
+          : option.fallback,
   };
 }
 
@@ -959,7 +988,10 @@ Future<String?> _promptHidden(String prompt) {
   }
 
   stdin.echoMode = false;
-  lines = stdin.transform(utf8.decoder).transform(const LineSplitter()).listen(
+  lines = stdin
+      .transform(utf8.decoder)
+      .transform(const LineSplitter())
+      .listen(
         finish,
         onError: (Object _) => finish(null),
         onDone: () => finish(null),
@@ -1011,7 +1043,8 @@ Future<int> _status(SmsDockClient client, Arguments args, CliIo io) async {
   } else if (!_truthy(licence['enforced'])) {
     licenceText = 'not enforced';
   } else {
-    licenceText = 'free version, ${_show(licence['sentToday'])} of '
+    licenceText =
+        'free version, ${_show(licence['sentToday'])} of '
         '${_show(licence['dailyLimit'])} SMS sent today';
   }
   final lines = [
@@ -1034,22 +1067,20 @@ Future<int> _status(SmsDockClient client, Arguments args, CliIo io) async {
   final sims = status['sims'];
   if (sims is List && sims.isNotEmpty) {
     io.out.writeln();
-    _printTable(io, const [
-      'SIM',
-      'SLOT',
-      'NAME',
-      'NUMBER',
-      'DEFAULT'
-    ], [
-      for (final sim in sims.map(_object))
-        [
-          sim['subscriptionId'],
-          sim['slot'],
-          sim['name'],
-          sim['number'],
-          _yesNo(sim['isDefault']),
-        ],
-    ]);
+    _printTable(
+      io,
+      const ['SIM', 'SLOT', 'NAME', 'NUMBER', 'DEFAULT'],
+      [
+        for (final sim in sims.map(_object))
+          [
+            sim['subscriptionId'],
+            sim['slot'],
+            sim['name'],
+            sim['number'],
+            _yesNo(sim['isDefault']),
+          ],
+      ],
+    );
   }
   return exitOk;
 }
@@ -1134,7 +1165,8 @@ Future<int> _messages(SmsDockClient client, Arguments args, CliIo io) async {
   return exitOk;
 }
 
-Future<int> _send(SmsDockClient client, Arguments args, CliIo io) async {
+/// Returns the text to send: `--text` or standard input.
+Future<String> _textOf(Arguments args, CliIo io) async {
   var text = args.text('text');
   if (text == null) {
     if (io.inputIsTerminal()) {
@@ -1148,6 +1180,82 @@ Future<int> _send(SmsDockClient client, Arguments args, CliIo io) async {
   if (text.isEmpty) {
     throw UsageError('The text is empty.');
   }
+  return text;
+}
+
+Future<int> _sendGroup(SmsDockClient client, Arguments args, CliIo io) async {
+  final text = await _textOf(args, io);
+  final result = Map<String, Object?>.of(
+    await client.sendGroup(
+      (args['to']! as List).cast<String>(),
+      text,
+      sim: args.integer('sim'),
+      requestId: args.text('request-id'),
+    ),
+  );
+  var members = [
+    for (final member in result['messages']! as List)
+      Map<String, Object?>.of(member as JsonObject),
+  ];
+  if (args.flag('wait')) {
+    final deadline = DateTime.now().add(args.seconds('wait-timeout'));
+    members = [
+      for (final member in members)
+        if (member['status'] == 'failed')
+          member
+        else
+          Map<String, Object?>.of(
+            await client.waitForResult(
+              member['requestId']! as String,
+              timeout: _remaining(deadline),
+            ),
+          ),
+    ];
+    result['messages'] = members;
+  }
+  final failed = [
+    for (final member in members)
+      if (member['status'] == 'failed') member,
+  ];
+  if (args.flag('json')) {
+    _printJson(io, result);
+  } else {
+    io.out.writeln(
+      'Group ${_show(result['requestId'])}: ${members.length} recipient(s), '
+      '${_show(result['parts'])} part(s) each',
+    );
+    for (final member in members) {
+      if (member['status'] == 'failed') {
+        final code = member['errorCode'];
+        final cause = code == null ? '' : ', error code ${_show(code)}';
+        io.out.writeln(
+          '  Failed: ${_show(member['to'])}$cause, '
+          'requestId ${_show(member['requestId'])}',
+        );
+      } else {
+        io.out.writeln(
+          '  ${_capitalize(_show(member['status']))}: ${_show(member['to'])}, '
+          'requestId ${_show(member['requestId'])}',
+        );
+      }
+    }
+    if (failed.isNotEmpty) {
+      io.err.writeln(
+        'smsdock: ${failed.length} of ${members.length} message(s) failed',
+      );
+    }
+  }
+  return failed.isEmpty ? exitOk : exitApiError;
+}
+
+/// The time left until [deadline], at least zero.
+Duration _remaining(DateTime deadline) {
+  final left = deadline.difference(DateTime.now());
+  return left.isNegative ? Duration.zero : left;
+}
+
+Future<int> _send(SmsDockClient client, Arguments args, CliIo io) async {
+  final text = await _textOf(args, io);
   JsonObject result = await client.send(
     args.text('to')!,
     text,
@@ -1242,9 +1350,7 @@ Future<int> _listen(SmsDockClient client, Arguments args, CliIo io) async {
   client.onReconnect = (dock) => _reportReconnect(dock, io);
   await client.subscribe(events, address: args.text('address'));
   if (!json) {
-    io.err.writeln(
-      'Listening for ${events.join(', ')}. Press Ctrl+C to stop.',
-    );
+    io.err.writeln('Listening for ${events.join(', ')}. Press Ctrl+C to stop.');
   }
   var count = 0;
   await for (final event in client.events()) {
@@ -1341,8 +1447,9 @@ final RegExp _hostPattern = RegExp(
 final RegExp _integerPattern = RegExp(r'^\s*[+-]?\d+\s*$');
 
 Object _int(String text) {
-  final value =
-      _integerPattern.hasMatch(text) ? int.tryParse(text.trim()) : null;
+  final value = _integerPattern.hasMatch(text)
+      ? int.tryParse(text.trim())
+      : null;
   if (value == null) {
     throw UsageError("invalid int value: '$text'");
   }
@@ -1364,8 +1471,9 @@ Object _float(String text) {
 }
 
 Object _positive(String text) {
-  final value =
-      _integerPattern.hasMatch(text) ? int.tryParse(text.trim()) ?? 0 : 0;
+  final value = _integerPattern.hasMatch(text)
+      ? int.tryParse(text.trim()) ?? 0
+      : 0;
   if (value < 1) {
     throw UsageError('must be a number from 1');
   }
@@ -1421,7 +1529,8 @@ Object _timestamp(String text) {
   final fraction = (match.group(7) ?? '').padRight(6, '0');
   final micros = int.parse(fraction);
   final date = DateTime.utc(year, month, day);
-  final valid = year >= 1 &&
+  final valid =
+      year >= 1 &&
       date.month == month &&
       date.day == day &&
       hour < 24 &&
@@ -1473,7 +1582,8 @@ String _time(Object? milliseconds, {bool seconds = false}) {
     return _show(milliseconds);
   }
   String two(int value) => '$value'.padLeft(2, '0');
-  final date = '${'${moment.year}'.padLeft(4, '0')}-${two(moment.month)}-'
+  final date =
+      '${'${moment.year}'.padLeft(4, '0')}-${two(moment.month)}-'
       '${two(moment.day)}';
   final time = '${two(moment.hour)}:${two(moment.minute)}';
   return seconds ? '$date $time:${two(moment.second)}' : '$date $time';
@@ -1533,25 +1643,25 @@ String _oneLine(Object? text) {
 
 /// Whether Python would take the value for true.
 bool _truthy(Object? value) => switch (value) {
-      null || false => false,
-      final num number => number != 0,
-      final String text => text.isNotEmpty,
-      final List<dynamic> list => list.isNotEmpty,
-      final Map<dynamic, dynamic> map => map.isNotEmpty,
-      _ => true,
-    };
+  null || false => false,
+  final num number => number != 0,
+  final String text => text.isNotEmpty,
+  final List<dynamic> list => list.isNotEmpty,
+  final Map<dynamic, dynamic> map => map.isNotEmpty,
+  _ => true,
+};
 
 String _yesNo(Object? value) => _truthy(value) ? 'yes' : 'no';
 
 /// A value inside a line of text, written the way the Python tool does.
 String _show(Object? value) => switch (value) {
-      null => 'None',
-      true => 'True',
-      false => 'False',
-      final String text => text,
-      final num number => '$number',
-      _ => spacedJson(value),
-    };
+  null => 'None',
+  true => 'True',
+  false => 'False',
+  final String text => text,
+  final num number => '$number',
+  _ => spacedJson(value),
+};
 
 String _capitalize(String text) => text.isEmpty
     ? text
@@ -1566,14 +1676,12 @@ void _printJson(CliIo io, Object? value) {
 
 /// JSON on one line with a space after `,` and `:`.
 String spacedJson(Object? value) => switch (value) {
-      final List<dynamic> list => '[${list.map(spacedJson).join(', ')}]',
-      final Map<dynamic, dynamic> map => '{${[
-          for (final entry in map.entries)
-            '${jsonEncode('${entry.key}')}: '
-                '${spacedJson(entry.value)}'
-        ].join(', ')}}',
-      _ => jsonEncode(value),
-    };
+  final List<dynamic> list => '[${list.map(spacedJson).join(', ')}]',
+  final Map<dynamic, dynamic> map =>
+    '{${[for (final entry in map.entries) '${jsonEncode('${entry.key}')}: '
+          '${spacedJson(entry.value)}'].join(', ')}}',
+  _ => jsonEncode(value),
+};
 
 void _printTable(CliIo io, List<String> headers, List<List<Object?>> rows) {
   final table = [

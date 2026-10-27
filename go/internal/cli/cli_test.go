@@ -615,6 +615,64 @@ func TestSend(t *testing.T) {
 	equal(t, sent[0].Body, "All systems running.")
 }
 
+func TestSendGroup(t *testing.T) {
+	server := startServer(t, nil)
+	got := run(t, commandLine(server, "send-group", "--to", ben, "--to", anna,
+		"--text", "Hello all", "--request-id", "news-1", "--sim", "2")...)
+	equal(t, got, result{0, "Group news-1: 2 recipient(s), 1 part(s) each\n" +
+		"  Queued: " + ben + ", requestId news-1.1\n" +
+		"  Queued: " + anna + ", requestId news-1.2\n", ""})
+	sent := server.Sent()
+	equal(t, len(sent), 2)
+	equal(t, sent[0], fakeserver.SentMessage{
+		RequestID: "news-1.1", To: ben, Body: "Hello all", Sim: 2, Group: "news-1",
+	})
+	// Both numbers after one --to work too.
+	got = run(t, commandLine(server, "send-group", "--to", ben, anna,
+		"--text", "Hello all", "--request-id", "news-1")...)
+	equal(t, got.code, 0)
+	equal(t, len(server.Sent()), 2)
+}
+
+func TestSendGroupAndWait(t *testing.T) {
+	server := startServer(t, nil)
+	server.FailNumbers(anna)
+	got := run(t, commandLine(server, "send-group", "--to", ben, "--to", anna,
+		"--text", "Hello all", "--request-id", "news-2", "--wait")...)
+	equal(t, got, result{1, "Group news-2: 2 recipient(s), 1 part(s) each\n" +
+		"  Sent: " + ben + ", requestId news-2.1\n" +
+		"  Failed: " + anna + ", error code 1, requestId news-2.2\n",
+		"smsdock: 1 of 2 message(s) failed\n"})
+}
+
+func TestSendGroupJSON(t *testing.T) {
+	server := startServer(t, nil)
+	got := run(t, commandLine(server, "send-group", "--to", ben, "--text", "Hello",
+		"--request-id", "news-3", "--json")...)
+	equal(t, got.code, 0)
+	printed := decodeJSON[map[string]any](t, got.out)
+	equal(t, printed["requestId"], any("news-3"))
+	equal(t, printed["status"], any("queued"))
+	members := printed["messages"].([]any)
+	equal(t, len(members), 1)
+	equal(t, members[0].(map[string]any)["requestId"], any("news-3.1"))
+
+	got = run(t, commandLine(server, "send-group", "--to", ben, "--text", "Hello",
+		"--request-id", "news-4", "--json", "--wait")...)
+	equal(t, got.code, 0)
+	members = decodeJSON[map[string]any](t, got.out)["messages"].([]any)
+	equal(t, members[0].(map[string]any)["status"], any("sent"))
+	equal(t, members[0].(map[string]any)["partsSent"], any(1.0))
+}
+
+func TestSendGroupNeedsRecipients(t *testing.T) {
+	server := startServer(t, nil)
+	got := run(t, commandLine(server, "send-group", "--text", "Hello")...)
+	equal(t, got.code, 2)
+	wantPart(t, got.err, "--to")
+	equal(t, len(server.Sent()), 0)
+}
+
 func TestSendFromStandardInput(t *testing.T) {
 	server := startServer(t, nil)
 	app := &App{Stdin: strings.NewReader("Line one\nLine two\n")}

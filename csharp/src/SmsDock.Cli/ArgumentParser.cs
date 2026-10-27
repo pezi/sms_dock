@@ -284,6 +284,24 @@ internal sealed partial class ArgumentParser
                 .Add(new OptionSpec(
                     "--wait-timeout", OptionKind.Number, "SECONDS",
                     "longest time to wait with --wait (default: 60)")),
+            Connected(
+                "send-group", "send one text to several numbers, one SMS each",
+                "Send the same text to several numbers as separate SMS. Without --text the text is read from "
+                + "standard input.")
+                .Add(new OptionSpec(
+                    "--to", OptionKind.Many, "NUMBER", "phone numbers of the recipients (at most 20)")
+                {
+                    Required = true,
+                })
+                .Add(new OptionSpec("--text", OptionKind.Text, null, "text of the message"))
+                .Add(new OptionSpec("--sim", OptionKind.Integer, "ID", "subscription id of the SIM"))
+                .Add(new OptionSpec(
+                    "--request-id", OptionKind.Text, "ID", "your own id of the group; the same id is sent only once"))
+                .Add(new OptionSpec(
+                    "--wait", OptionKind.Flag, null, "wait until every message was sent or failed"))
+                .Add(new OptionSpec(
+                    "--wait-timeout", OptionKind.Number, "SECONDS",
+                    "longest time to wait with --wait (default: 60)")),
             Connected("delete", "delete a message or a conversation", null)
                 .Add(new OptionSpec("--message", OptionKind.Integer, "ID", "id of the message") { Group = "target" })
                 .Add(new OptionSpec("--conversation", OptionKind.Integer, "ID", "id of the conversation")

@@ -222,6 +222,30 @@ for example `Sent: …`. If the first message failed, the second run fails
 too (exit code 1); use a new id to try again. The same id with another
 number or text is an error (`invalid_request`).
 
+### send-group
+
+```bash
+smsdock send-group wss://192.168.1.50:9443/ws \
+  --to +4369912345678 --to +436641112223 --text 'Meeting at 10.'
+```
+
+```
+Group 3f9c…: 2 recipient(s), 1 part(s) each
+  Queued: +4369912345678, requestId 3f9c….1
+  Queued: +436641112223, requestId 3f9c….2
+```
+
+The same text goes to every number as a separate SMS; nobody sees the
+other recipients. The options are those of `send`, with `--to` repeated
+for every recipient (at most 20). The phone checks the whole group before
+it sends anything: a bad number, a text that is too long, fewer messages
+left in the daily limit than recipients, or more than 20 SMS parts in
+total (parts × recipients) refuse the group. A recipient the phone
+refuses afterwards is printed as `Failed`; the others are sent. With
+`--wait` the command waits for every message and ends with exit code 1
+if any of them failed. `--request-id` names the group; the members get
+the ids `ID.1`, `ID.2` and so on, which `--json` prints.
+
 ### delete
 
 ```bash
@@ -385,6 +409,7 @@ matching interfaces for editors and type checkers.
 | `iterMessages({…, pageSize = 50, maxItems})` | Async iterator of Message; same filters as `messages` |
 | `getMessage(messageId)` | Message |
 | `send(to, body, {sim, requestId})` | SendResult |
+| `sendGroup(to, body, {sim, requestId})` | GroupSendResult: one SMS per number in the array `to`, at most 20 |
 | `messageStatus(requestId)` | Outbox entry |
 | `waitForResult(requestId, {timeout, delivered = false, pollInterval = 1})` | Outbox entry with the status `sent`, `delivered` or `failed` |
 | `deleteMessage(messageId)` | `{deleted: 1, mode: 'hidden'}` |
@@ -469,6 +494,35 @@ with `ApiError` and the code `invalid_request`.
 
 The status of a message is `queued` (handed to the phone), `sending`
 (some parts are left), `sent`, `delivered` or `failed`.
+
+### One text to several numbers
+
+`sendGroup()` sends the same text to every number of an array as separate
+SMS. The result names the group and holds one SendResult per recipient;
+their request ids are `<requestId>.1`, `<requestId>.2` and so on, and
+`waitForResult()` and `messageStatus()` take them like those of single
+messages.
+
+```js
+const result = await dock.sendGroup(
+  ['+4369912345678', '+436641112223'], 'Meeting at 10.', { requestId: 'meeting-1' },
+);
+for (const member of result.messages) {
+  if (member.status === 'failed') {        // the phone refused this one at once
+    console.log(member.to, 'refused');
+    continue;
+  }
+  const outcome = await dock.waitForResult(member.requestId, { timeout: 60 });
+  console.log(member.to, outcome.status);
+}
+```
+
+The phone checks the whole group before the first SMS leaves: a number
+that is not a phone number, a text that is too long, fewer messages left
+in the daily limit of the free version than the group has recipients, or
+more SMS parts than the 20 of one minute (parts × recipients) reject with
+an `ApiError` and nothing is sent. A `requestId` of a group has at most 61
+characters and makes the group safe to repeat, as for `send()`.
 
 ### Events and hooks
 
@@ -684,7 +738,7 @@ try {
 
 ## Examples
 
-The directory [examples/](examples) contains four short programs. Each
+The directory [examples/](examples) contains five short programs. Each
 takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 `SMSDOCK_FINGERPRINT`.
 
@@ -692,12 +746,14 @@ takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 | --- | --- |
 | [list_messages.mjs](examples/list_messages.mjs) | The last 10 incoming SMS |
 | [send_sms.mjs](examples/send_sms.mjs) | Send one SMS and wait for the result |
+| [send_group_sms.mjs](examples/send_group_sms.mjs) | Send one text to several numbers, one SMS each, and wait for every result |
 | [listen_incoming.mjs](examples/listen_incoming.mjs) | Hook: call a function for every incoming SMS, also for those that arrived while the connection was down |
 | [auto_reply.mjs](examples/auto_reply.mjs) | Hook that answers incoming SMS, with guards against reply loops |
 
 ```bash
 node examples/list_messages.mjs wss://192.168.1.50:9443/ws
 node examples/send_sms.mjs wss://192.168.1.50:9443/ws +4369912345678 'Hello'
+node examples/send_group_sms.mjs wss://192.168.1.50:9443/ws 'Hello all' +4369912345678 +436641112223
 node examples/listen_incoming.mjs wss://192.168.1.50:9443/ws
 node examples/auto_reply.mjs wss://192.168.1.50:9443/ws
 ```

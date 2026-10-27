@@ -46,8 +46,9 @@ pub use client::{
 };
 pub use error::{Error, Result};
 pub use models::{
-    AppInfo, Contact, ContactNumber, Conversation, DeleteResult, Event, Licence, MarkReadResult,
-    Message, OutboxEntry, Page, Permissions, PingResult, SendResult, Sim, Status, Subscription,
+    AppInfo, Contact, ContactNumber, Conversation, DeleteResult, Event, GroupSendResult, Licence,
+    MarkReadResult, Message, OutboxEntry, Page, Permissions, PingResult, SendResult, Sim, Status,
+    Subscription,
 };
 pub use tls::{
     certificate_fingerprint, fetch_fingerprint, format_fingerprint, normalize_fingerprint,
@@ -67,6 +68,9 @@ pub const MAX_INCOMING_BYTES: usize = 4 * 1024 * 1024;
 
 /// Largest value of `limit`.
 pub const MAX_PAGE_SIZE: u32 = 200;
+
+/// Recipients of one group message at most.
+pub const MAX_GROUP_RECIPIENTS: usize = 20;
 
 /// Environment variable that holds the password.
 pub const PASSWORD_ENV: &str = "SMSDOCK_PASSWORD";

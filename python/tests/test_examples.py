@@ -96,6 +96,30 @@ def test_send_sms(need_tls: TlsFiles, server: FakeSmsDock) -> None:
     assert [(m["to"], m["body"]) for m in server.sent] == [(BEN, "Hello")]
 
 
+def test_send_group_sms(need_tls: TlsFiles, server: FakeSmsDock) -> None:
+    server.refuse_numbers.add(ANNA)
+    result = run_example(
+        "send_group_sms.py", need_tls, server.url, "Hello all", BEN, ANNA
+    )
+    assert result.returncode == 1, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == "2 recipient(s), 1 part(s) each"
+    assert lines[1].startswith(f"{BEN}: sent, message id ")
+    assert lines[2] == f"{ANNA}: refused by the phone"
+    assert [(m["to"], m["body"]) for m in server.sent] == [
+        (BEN, "Hello all"), (ANNA, "Hello all"),
+    ]
+
+
+def test_send_group_sms_refused(need_tls: TlsFiles, server: FakeSmsDock) -> None:
+    result = run_example(
+        "send_group_sms.py", need_tls, server.url, "Hello", BEN, "abc"
+    )
+    assert result.returncode == 1
+    assert result.stdout.startswith("Not sent: invalid_number")
+    assert server.sent == []
+
+
 def test_send_sms_refused(need_tls: TlsFiles, server: FakeSmsDock) -> None:
     result = run_example("send_sms.py", need_tls, server.url, "abc", "Hello")
     assert result.returncode == 1
@@ -117,7 +141,8 @@ def test_examples_report_a_missing_fingerprint(
 
 
 @pytest.mark.parametrize("name", [
-    "list_messages.py", "send_sms.py", "listen_incoming.py", "auto_reply.py",
+    "list_messages.py", "send_sms.py", "send_group_sms.py", "listen_incoming.py",
+    "auto_reply.py",
 ])
 def test_examples_explain_their_usage(name: str, need_tls: TlsFiles) -> None:
     result = run_example(name, need_tls)

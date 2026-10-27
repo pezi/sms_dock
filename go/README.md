@@ -241,6 +241,30 @@ for example `Sent: …`. If the first message failed, the second run fails
 too (exit code 1); use a new id to try again. The same id with another
 number or text is an error (`invalid_request`).
 
+### send-group
+
+```bash
+smsdock send-group wss://192.168.1.50:9443/ws \
+  --to +4369912345678 --to +436641112223 --text 'Meeting at 10.'
+```
+
+```
+Group 3f9c…: 2 recipient(s), 1 part(s) each
+  Queued: +4369912345678, requestId 3f9c….1
+  Queued: +436641112223, requestId 3f9c….2
+```
+
+The same text goes to every number as a separate SMS; nobody sees the
+other recipients. The options are those of `send`, with `--to` taking
+several numbers or being repeated (at most 20). The phone checks the
+whole group before it sends anything: a bad number, a text that is too
+long, fewer messages left in the daily limit than recipients, or more
+than 20 SMS parts in total (parts × recipients) refuse the group. A
+recipient the phone refuses afterwards is printed as `Failed`; the others
+are sent. With `--wait` the command waits for every message and ends with
+exit code 1 if any of them failed. `--request-id` names the group; the
+members get the ids `ID.1`, `ID.2` and so on, which `--json` prints.
+
 ### delete
 
 ```bash
@@ -437,6 +461,7 @@ fields.
 | `IterMessages(ctx, MessageFilter{…}, IterOptions{PageSize, MaxItems})` | Iterator of `Message`; same filters as `Messages` |
 | `GetMessage(ctx, messageID)` | `*Message` |
 | `Send(ctx, to, body, *SendOptions{Sim, RequestID})` | `*SendResult` |
+| `SendGroup(ctx, []string{to…}, body, *SendOptions{Sim, RequestID})` | `*GroupSendResult`: one SMS per number, at most 20 |
 | `MessageStatus(ctx, requestID)` | `*OutboxEntry` |
 | `WaitForResult(ctx, requestID, *WaitOptions{Timeout, Delivered, PollInterval})` | `*OutboxEntry` with the status `sent`, `delivered` or `failed` |
 | `DeleteMessage(ctx, messageID)` | `*DeleteResult`: `{Deleted: 1, Mode: "hidden"}` |
@@ -536,6 +561,41 @@ stands for one message: using it for another recipient or text is an
 
 The status of a message is `queued` (handed to the phone), `sending`
 (some parts are left), `sent`, `delivered` or `failed`.
+
+### One text to several numbers
+
+`SendGroup()` sends the same text to every number of a list as separate
+SMS. The result names the group and holds one `SendResult` per
+recipient in `Messages`; their request ids are `<RequestID>.1`,
+`<RequestID>.2` and so on, and `WaitForResult()` and `MessageStatus()`
+take them like those of single messages.
+
+```go
+result, err := dock.SendGroup(ctx, []string{"+4369912345678", "+436641112223"},
+	"Meeting at 10.", &smsdock.SendOptions{RequestID: "meeting-1"})
+if err != nil {
+	return err
+}
+for _, member := range result.Messages {
+	if member.Status == "failed" { // the phone refused this one at once
+		fmt.Println(member.To, "refused")
+		continue
+	}
+	outcome, err := dock.WaitForResult(ctx, member.RequestID, nil)
+	if err != nil {
+		return err
+	}
+	fmt.Println(member.To, outcome.Status)
+}
+```
+
+The phone checks the whole group before the first SMS leaves: a number
+that is not a phone number, a text that is too long, fewer messages left
+in the daily limit of the free version than the group has recipients, or
+more SMS parts than the 20 of one minute (parts × recipients) return an
+`APIError` and nothing is sent. `Failed()` lists the members the phone
+refused. A `RequestID` of a group has at most 61 characters and makes the
+group safe to repeat, as for `Send()`.
 
 ### Events and hooks
 
@@ -778,7 +838,7 @@ fingerprint` does.
 
 ## Examples
 
-The directory [examples/](examples) contains four short programs. Each
+The directory [examples/](examples) contains five short programs. Each
 takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 `SMSDOCK_FINGERPRINT`.
 
@@ -786,12 +846,14 @@ takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 | --- | --- |
 | [list_messages](examples/list_messages/main.go) | The last 10 incoming SMS |
 | [send_sms](examples/send_sms/main.go) | Send one SMS and wait for the result |
+| [send_group_sms](examples/send_group_sms/main.go) | Send one text to several numbers, one SMS each, and wait for every result |
 | [listen_incoming](examples/listen_incoming/main.go) | Hook: call a function for every incoming SMS, also for those that arrived while the connection was down |
 | [auto_reply](examples/auto_reply/main.go) | Hook that answers incoming SMS, with guards against reply loops |
 
 ```bash
 go run ./examples/list_messages wss://192.168.1.50:9443/ws
 go run ./examples/send_sms wss://192.168.1.50:9443/ws +4369912345678 'Hello'
+go run ./examples/send_group_sms wss://192.168.1.50:9443/ws 'Hello all' +4369912345678 +436641112223
 go run ./examples/listen_incoming wss://192.168.1.50:9443/ws
 go run ./examples/auto_reply wss://192.168.1.50:9443/ws
 ```

@@ -16,6 +16,8 @@ export const DEFAULT_API_PORT: 9443;
 export const MAX_FRAME_BYTES: number;
 /** Largest value of `limit`. */
 export const MAX_PAGE_SIZE: 200;
+/** Recipients of one group message at most. */
+export const MAX_GROUP_RECIPIENTS: number;
 /** Environment variable that holds the password. */
 export const PASSWORD_ENV: 'SMSDOCK_PASSWORD';
 /** Environment variable that holds the certificate fingerprint. */
@@ -157,6 +159,22 @@ export interface SendResult {
   to: string;
   parts: number;
   status: MessageStatus;
+}
+
+/**
+ * Result of `messages.sendGroup`: one SMS per recipient.
+ *
+ * `messages` holds one SendResult per recipient in the order of `to`,
+ * with the request ids `<requestId>.1`, `<requestId>.2` and so on.
+ * `status` is the least advanced status of the members, or `failed` when
+ * every member failed.
+ */
+export interface GroupSendResult {
+  requestId: string;
+  to: string[];
+  parts: number;
+  status: MessageStatus;
+  messages: SendResult[];
 }
 
 /**
@@ -372,7 +390,10 @@ export interface IterateOptions {
 export interface SendOptions {
   /** Subscription id; default is the SMS SIM of the phone. */
   sim?: number | null;
-  /** Your own id, 1 to 64 characters of `A-Z a-z 0-9 . _ -`. */
+  /**
+   * Your own id, 1 to 64 characters of `A-Z a-z 0-9 . _ -`; at most 61
+   * for a group, whose members get `<requestId>.1`, `<requestId>.2` …
+   */
   requestId?: string | null;
 }
 
@@ -445,6 +466,7 @@ export class SmsDockClient {
   iterMessages(options?: MessageFilter & IterateOptions): AsyncGenerator<Message, void, void>;
   getMessage(messageId: number): Promise<Message>;
   send(to: string, body: string, options?: SendOptions): Promise<SendResult>;
+  sendGroup(to: string[], body: string, options?: SendOptions): Promise<GroupSendResult>;
   messageStatus(requestId: string): Promise<OutboxEntry>;
   waitForResult(requestId: string, options?: WaitForResultOptions): Promise<OutboxEntry>;
   deleteMessage(messageId: number): Promise<DeleteResult>;

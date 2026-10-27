@@ -139,6 +139,38 @@ fn send_sms() {
 }
 
 #[test]
+fn send_group_sms() {
+    let server = FakeServer::new();
+    server.state().refuse_numbers.insert(ANNA.to_owned());
+    let output = run(
+        "send_group_sms",
+        &server,
+        &[&server.url(), "Hello all", BEN, ANNA],
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let out = text(&output.stdout);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "2 recipient(s), 1 part(s) each");
+    assert!(lines[1].starts_with(&format!("{BEN}: sent, message id ")));
+    assert_eq!(lines[2], format!("{ANNA}: refused by the phone"));
+    let sent = server.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        (&sent[0]["to"], &sent[1]["to"], &sent[0]["body"]),
+        (&json!(BEN), &json!(ANNA), &json!("Hello all"))
+    );
+
+    let output = run(
+        "send_group_sms",
+        &server,
+        &[&server.url(), "Hello", BEN, "abc"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(text(&output.stdout).starts_with("Not sent: invalid_number"));
+    assert_eq!(server.sent().len(), 2);
+}
+
+#[test]
 fn examples_report_a_missing_fingerprint() {
     let server = FakeServer::new();
     let output = command("list_messages", None, &[&server.url()])
@@ -153,7 +185,13 @@ fn examples_report_a_missing_fingerprint() {
 #[test]
 fn examples_explain_their_usage() {
     let server = FakeServer::new();
-    for name in ["list_messages", "send_sms", "listen_incoming", "auto_reply"] {
+    for name in [
+        "list_messages",
+        "send_sms",
+        "send_group_sms",
+        "listen_incoming",
+        "auto_reply",
+    ] {
         let output = run(name, &server, &[]);
         assert_eq!(output.status.code(), Some(2), "{name}");
         assert!(text(&output.stdout).contains("Usage:"), "{name}");

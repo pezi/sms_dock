@@ -143,6 +143,35 @@ type SendResult struct {
 	Raw json.RawMessage `json:"-"`
 }
 
+// GroupSendResult is the result of messages.sendGroup: one SMS per
+// recipient.
+//
+// Messages holds one SendResult per recipient in the order of To, with the
+// request ids "<RequestID>.1", "<RequestID>.2" and so on. Status is the
+// least advanced status of the members, or "failed" when every member
+// failed.
+type GroupSendResult struct {
+	RequestID string       `json:"requestId"`
+	To        []string     `json:"to"`
+	Parts     int          `json:"parts"`
+	Status    string       `json:"status"`
+	Messages  []SendResult `json:"messages"`
+
+	// Raw is the object as the server sent it.
+	Raw json.RawMessage `json:"-"`
+}
+
+// Failed returns the members the phone refused.
+func (r *GroupSendResult) Failed() []SendResult {
+	var failed []SendResult
+	for _, member := range r.Messages {
+		if member.Status == "failed" {
+			failed = append(failed, member)
+		}
+	}
+	return failed
+}
+
 // OutboxEntry is the state of a message sent through SMS Dock.
 //
 // Status is queued (handed to the phone), sending (some parts are left),
@@ -259,11 +288,23 @@ type rawSetter interface {
 	setRaw(raw json.RawMessage)
 }
 
-func (m *Message) setRaw(raw json.RawMessage)        { m.Raw = raw }
-func (c *Conversation) setRaw(raw json.RawMessage)   { c.Raw = raw }
-func (c *Contact) setRaw(raw json.RawMessage)        { c.Raw = raw }
-func (s *Status) setRaw(raw json.RawMessage)         { s.Raw = raw }
-func (r *SendResult) setRaw(raw json.RawMessage)     { r.Raw = raw }
+func (m *Message) setRaw(raw json.RawMessage)      { m.Raw = raw }
+func (c *Conversation) setRaw(raw json.RawMessage) { c.Raw = raw }
+func (c *Contact) setRaw(raw json.RawMessage)      { c.Raw = raw }
+func (s *Status) setRaw(raw json.RawMessage)       { s.Raw = raw }
+func (r *SendResult) setRaw(raw json.RawMessage)   { r.Raw = raw }
+func (r *GroupSendResult) setRaw(raw json.RawMessage) {
+	r.Raw = raw
+	var fields struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	json.Unmarshal(raw, &fields)
+	for index := range r.Messages {
+		if index < len(fields.Messages) {
+			r.Messages[index].Raw = fields.Messages[index]
+		}
+	}
+}
 func (e *OutboxEntry) setRaw(raw json.RawMessage)    { e.Raw = raw }
 func (r *DeleteResult) setRaw(raw json.RawMessage)   { r.Raw = raw }
 func (r *MarkReadResult) setRaw(raw json.RawMessage) { r.Raw = raw }

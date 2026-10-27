@@ -174,8 +174,8 @@ Future<bool> waitUntil(
 
 /// Returns the actions the server received, in order.
 List<Object?> actions(FakeSmsDock server) => [
-      for (final request in server.requests) request['action'],
-    ];
+  for (final request in server.requests) request['action'],
+];
 
 /// How often the server received an action.
 int countOf(FakeSmsDock server, String action) =>
@@ -183,9 +183,9 @@ int countOf(FakeSmsDock server, String action) =>
 
 /// Returns the requests with this action, in order.
 List<JsonObject> requestsOf(FakeSmsDock server, String action) => [
-      for (final request in server.requests)
-        if (request['action'] == action) request,
-    ];
+  for (final request in server.requests)
+    if (request['action'] == action) request,
+];
 
 /// Returns the newest request with this action.
 JsonObject lastRequest(FakeSmsDock server, String action) =>
@@ -193,25 +193,25 @@ JsonObject lastRequest(FakeSmsDock server, String action) =>
 
 /// Returns an `sms.received` event as the server would send it.
 JsonObject eventFrame(int sequence, [String body = 'Hi']) => {
-      'event': 'sms.received',
-      'seq': sequence,
-      'data': {
-        'message': {
-          'id': 9000 + sequence,
-          'conversationId': 1,
-          'address': anna,
-          'contact': null,
-          'direction': 'in',
-          'body': body,
-          'timestamp': baseTime,
-          'sentTimestamp': baseTime,
-          'read': false,
-          'status': 'received',
-          'sim': 1,
-          'requestId': null,
-        },
-      },
-    };
+  'event': 'sms.received',
+  'seq': sequence,
+  'data': {
+    'message': {
+      'id': 9000 + sequence,
+      'conversationId': 1,
+      'address': anna,
+      'contact': null,
+      'direction': 'in',
+      'body': body,
+      'timestamp': baseTime,
+      'sentTimestamp': baseTime,
+      'read': false,
+      'status': 'received',
+      'sim': 1,
+      'requestId': null,
+    },
+  },
+};
 
 /// Awaits a future that must fail with an error of the type [T].
 Future<T> failure<T extends Object>(Future<Object?> future) async {

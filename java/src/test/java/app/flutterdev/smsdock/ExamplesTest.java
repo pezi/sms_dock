@@ -72,7 +72,8 @@ class ExamplesTest {
     void examplesExplainThemselvesWithoutArguments() throws Exception {
         PrintStream original = System.out;
         try {
-            for (String name : new String[] {"ListMessages", "SendSms", "AutoReply"}) {
+            for (String name : new String[] {
+                    "ListMessages", "SendSms", "SendGroupSms", "AutoReply"}) {
                 ByteArrayOutputStream captured = new ByteArrayOutputStream();
                 System.setOut(new PrintStream(captured, true, StandardCharsets.UTF_8));
                 Method run = Class.forName(name).getDeclaredMethod("run", String[].class);

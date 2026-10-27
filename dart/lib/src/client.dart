@@ -63,6 +63,10 @@ int debugMaxFrameBytes = maxFrameBytes;
 Future<void> _sleep(Duration pause) => Future<void>.delayed(pause);
 
 final RegExp _requestIdPattern = RegExp(r'^[A-Za-z0-9._-]{1,64}$');
+final RegExp _groupRequestIdPattern = RegExp(r'^[A-Za-z0-9._-]{1,61}$');
+
+/// Recipients of one group message at most.
+const int maxGroupRecipients = 20;
 const List<String> _directions = ['in', 'out', 'all'];
 const List<String> _outcomeEvents = ['sms.sent', 'sms.delivered', 'sms.failed'];
 const int _maxBackoffExponent = 16;
@@ -585,9 +589,8 @@ class SmsDockClient {
   }
 
   /// Returns one message. Throws `not_found` if it does not exist.
-  Future<Message> getMessage(int messageId) async => Message(
-        await request('messages.get', fields: {'messageId': messageId}),
-      );
+  Future<Message> getMessage(int messageId) async =>
+      Message(await request('messages.get', fields: {'messageId': messageId}));
 
   /// Sends an SMS and returns the [SendResult].
   ///
@@ -636,10 +639,62 @@ class SmsDockClient {
     return SendResult(await request('messages.send', fields: fields));
   }
 
+  /// Sends one text to several numbers, one SMS each, and returns the
+  /// [GroupSendResult].
+  ///
+  /// [to] holds 1 to 20 phone numbers; repeated numbers are sent once.
+  /// Every recipient gets a separate SMS and does not see the others. The
+  /// result holds one [SendResult] per recipient; their request ids are
+  /// `<requestId>.1`, `<requestId>.2` and so on, and [waitForResult] and
+  /// [messageStatus] take them like those of single messages.
+  ///
+  /// The phone checks the whole group before it sends anything: a number
+  /// that is not a phone number (`invalid_number`), a text that is too
+  /// long, fewer messages left in the daily limit of the free version than
+  /// the group has recipients (`quota_exceeded`) or more SMS parts than
+  /// the 20 of one minute, parts times recipients (`invalid_request`),
+  /// refuse the whole group. A refusal by the phone for one recipient does
+  /// not stop the others; that member has the status `failed` in
+  /// `messages`.
+  ///
+  /// [requestId] has at most 61 characters here, so that the member suffix
+  /// fits, and works as for [send]: the same id with the same text and
+  /// numbers is not sent again but answered with the stored members and
+  /// their current status.
+  Future<GroupSendResult> sendGroup(
+    List<String> to,
+    String body, {
+    int? sim,
+    String? requestId,
+  }) async {
+    if (to.isEmpty || to.any((number) => number.trim().isEmpty)) {
+      throw ArgumentError("'to' must be a list of phone numbers");
+    }
+    if (to.length > maxGroupRecipients) {
+      throw ArgumentError("'to' holds more than $maxGroupRecipients numbers");
+    }
+    if (body.isEmpty) {
+      throw ArgumentError("'body' must be a text");
+    }
+    if (requestId != null && !_groupRequestIdPattern.hasMatch(requestId)) {
+      throw ArgumentError(
+        'requestId of a group must be 1 to 61 characters of '
+        'A-Z a-z 0-9 . _ -',
+      );
+    }
+    final fields = <String, Object?>{
+      'to': List<String>.of(to),
+      'body': body,
+      'requestId': requestId ?? _randomId(),
+      if (sim != null) 'sim': sim,
+    };
+    return GroupSendResult(await request('messages.sendGroup', fields: fields));
+  }
+
   /// Returns the outbox entry of a message sent through SMS Dock.
   Future<OutboxEntry> messageStatus(String requestId) async => OutboxEntry(
-        await request('messages.status', fields: {'requestId': requestId}),
-      );
+    await request('messages.status', fields: {'requestId': requestId}),
+  );
 
   /// Waits until a sent message succeeded or failed.
   ///
@@ -715,8 +770,8 @@ class SmsDockClient {
   /// the phone. If the connection drops after the server deleted the
   /// message, the repeated request fails with `not_found`.
   Future<DeleteResult> deleteMessage(int messageId) async => DeleteResult(
-        await request('messages.delete', fields: {'messageId': messageId}),
-      );
+    await request('messages.delete', fields: {'messageId': messageId}),
+  );
 
   /// Deletes a conversation; `deleted` is the number of its messages.
   Future<DeleteResult> deleteConversation(int conversationId) async =>
@@ -732,11 +787,11 @@ class SmsDockClient {
   /// Android lets only the default SMS app change messages; otherwise the
   /// error is `not_default_app`.
   Future<MarkReadResult> markRead(int conversationId) async => MarkReadResult(
-        await request(
-          'conversations.markRead',
-          fields: {'conversationId': conversationId},
-        ),
-      );
+    await request(
+      'conversations.markRead',
+      fields: {'conversationId': conversationId},
+    ),
+  );
 
   /// Returns one page of contacts, sorted by name.
   ///
@@ -1045,14 +1100,16 @@ class SmsDockClient {
     };
     final WebSocket socket;
     try {
-      socket = await WebSocket.connect(
-        '${target.uri}',
-        customClient: http,
-        compression: CompressionOptions.compressionOff,
-      ).timeout(
-        connectTimeout,
-        onTimeout: () => throw TimeoutException('timed out', connectTimeout),
-      );
+      socket =
+          await WebSocket.connect(
+            '${target.uri}',
+            customClient: http,
+            compression: CompressionOptions.compressionOff,
+          ).timeout(
+            connectTimeout,
+            onTimeout: () =>
+                throw TimeoutException('timed out', connectTimeout),
+          );
     } catch (error) {
       http.close(force: true);
       transport?.destroy();
@@ -1582,8 +1639,9 @@ class SmsDockClient {
     String? cursor;
     var count = 0;
     while (maxItems == null || count < maxItems) {
-      final limit =
-          maxItems == null ? pageSize : min(pageSize, maxItems - count);
+      final limit = maxItems == null
+          ? pageSize
+          : min(pageSize, maxItems - count);
       final page = await request(
         action,
         fields: {...filters, ..._paging(limit, cursor)},
@@ -1716,13 +1774,13 @@ String _keysOf(Object? value) =>
 
 /// A value inside an error text, written the way Python writes it.
 String _repr(Object? value) => switch (value) {
-      null => 'None',
-      true => 'True',
-      false => 'False',
-      final String text => "'$text'",
-      final num number => '$number',
-      _ => jsonEncode(value),
-    };
+  null => 'None',
+  true => 'True',
+  false => 'False',
+  final String text => "'$text'",
+  final num number => '$number',
+  _ => jsonEncode(value),
+};
 
 /// The text of a failed connection, written as Python writes it.
 String describeSocketError(SocketException error) {
@@ -1745,9 +1803,9 @@ String _describe(Object error) {
 }
 
 String _randomId() => [
-      for (var index = 0; index < 16; index += 1)
-        _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
-    ].join();
+  for (var index = 0; index < 16; index += 1)
+    _random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+].join();
 
 ({Uri uri, String host, int port}) _parseUrl(String url) {
   final parts = Uri.tryParse(url.trim());
@@ -1804,14 +1862,13 @@ void _checkRequest(String action, Map<String, Object?> fields) {
 }
 
 int _millis(Object value, String label) => switch (value) {
-      final DateTime moment => moment.millisecondsSinceEpoch,
-      final int milliseconds => milliseconds,
-      final double milliseconds when milliseconds.isFinite =>
-        milliseconds.toInt(),
-      _ => throw ArgumentError(
-          '$label must be milliseconds since the epoch or a DateTime',
-        ),
-    };
+  final DateTime moment => moment.millisecondsSinceEpoch,
+  final int milliseconds => milliseconds,
+  final double milliseconds when milliseconds.isFinite => milliseconds.toInt(),
+  _ => throw ArgumentError(
+    '$label must be milliseconds since the epoch or a DateTime',
+  ),
+};
 
 Map<String, Object?> _paging(int limit, String? cursor) {
   if (limit < 1 || limit > maxPageSize) {
@@ -1821,10 +1878,10 @@ Map<String, Object?> _paging(int limit, String? cursor) {
 }
 
 Map<String, Object?> _conversationFilter(String? q, bool unread, int? sim) => {
-      if (q != null) 'q': q,
-      if (unread) 'unread': true,
-      if (sim != null) 'sim': sim,
-    };
+  if (q != null) 'q': q,
+  if (unread) 'unread': true,
+  if (sim != null) 'sim': sim,
+};
 
 Map<String, Object?> _messageFilter(
   String? address,

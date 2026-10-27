@@ -41,27 +41,27 @@ Future<(FakeSmsDock, SmsDockClient)> pair({
 }
 
 List<Object?> bodies(Iterable<Map<String, dynamic>> messages) => [
-      for (final message in messages) message['body'],
-    ];
+  for (final message in messages) message['body'],
+];
 
 List<Object?> addresses(Iterable<Map<String, dynamic>> items) => [
-      for (final item in items) item['address'],
-    ];
+  for (final item in items) item['address'],
+];
 
 List<Object?> eventBodies(Iterable<SmsEvent> events) => [
-      for (final event in events) event.message?.body,
-    ];
+  for (final event in events) event.message?.body,
+];
 
 Future<List<SmsEvent>> drain(SmsDockClient client, num time) =>
     client.events(timeout: seconds(time)).toList();
 
 Matcher throwsArgument([Object? message]) => throwsA(
-      isA<ArgumentError>().having(
-        (error) => '${error.message}',
-        'message',
-        message ?? anything,
-      ),
-    );
+  isA<ArgumentError>().having(
+    (error) => '${error.message}',
+    'message',
+    message ?? anything,
+  ),
+);
 
 void main() {
   prepareTls();
@@ -138,7 +138,7 @@ void main() {
       'zz' * 32,
       'AB' * 31,
       'AB' * 33,
-      'AB' * 20
+      'AB' * 20,
     ]) {
       test('refuses the malformed fingerprint "$pin"', () {
         expect(
@@ -156,18 +156,17 @@ void main() {
         Duration reconnectDelay = const Duration(seconds: 1),
         int eventQueueSize = 1000,
         int rateLimitRetries = 2,
-      }) =>
-          SmsDockClient(
-            url,
-            password: password,
-            fingerprint: fingerprint,
-            timeout: timeout,
-            connectTimeout: connectTimeout,
-            reconnectAttempts: reconnectAttempts,
-            reconnectDelay: reconnectDelay,
-            eventQueueSize: eventQueueSize,
-            rateLimitRetries: rateLimitRetries,
-          );
+      }) => SmsDockClient(
+        url,
+        password: password,
+        fingerprint: fingerprint,
+        timeout: timeout,
+        connectTimeout: connectTimeout,
+        reconnectAttempts: reconnectAttempts,
+        reconnectDelay: reconnectDelay,
+        eventQueueSize: eventQueueSize,
+        rateLimitRetries: rateLimitRetries,
+      );
       expect(() => make(timeout: Duration.zero), throwsArgument());
       expect(() => make(connectTimeout: seconds(-1)), throwsArgument());
       expect(() => make(reconnectAttempts: -1), throwsArgument());
@@ -215,7 +214,9 @@ void main() {
       expect(CertificateMismatchError('a', 'b'), isA<SmsDockError>());
       expect(ApiError('a', 'b'), isA<Exception>());
       expect(
-          '${ApiError('not_found', 'No message.')}', 'not_found: No message.');
+        '${ApiError('not_found', 'No message.')}',
+        'not_found: No message.',
+      );
     });
   });
 
@@ -628,8 +629,9 @@ void main() {
 
     test('iterMessages follows the cursor', () async {
       final (server, client) = await pair();
-      final messages =
-          await client.iterMessages(address: anna, pageSize: 10).toList();
+      final messages = await client
+          .iterMessages(address: anna, pageSize: 10)
+          .toList();
       expect(bodies(messages), [
         for (var index = 24; index >= 0; index -= 1) 'Anna $index',
       ]);
@@ -872,6 +874,143 @@ void main() {
       );
       expect(outcome.status, 'sent');
       expect(server.sent, hasLength(2));
+    });
+
+    test('sendGroup', () async {
+      final (server, client) = await pair();
+      final result = await client.sendGroup(
+        ['+43 690 876-54321', anna, ben],
+        'Hello all',
+        sim: 2,
+        requestId: 'news-1',
+      );
+      expect(result.requestId, 'news-1');
+      expect(result.to, [ben, anna]);
+      expect(result.parts, 1);
+      expect(result.status, 'queued');
+      expect(
+        [for (final m in result.messages) (m.requestId, m.to, m.status)],
+        [('news-1.1', ben, 'queued'), ('news-1.2', anna, 'queued')],
+      );
+      expect(lastRequest(server, 'messages.sendGroup'), {
+        'id': 'dart-2',
+        'action': 'messages.sendGroup',
+        'to': ['+43 690 876-54321', anna, ben],
+        'body': 'Hello all',
+        'requestId': 'news-1',
+        'sim': 2,
+      });
+      expect(
+        [
+          for (final m in server.sent)
+            (m['requestId'], m['to'], m['sim'], m['group']),
+        ],
+        [('news-1.1', ben, 2, 'news-1'), ('news-1.2', anna, 2, 'news-1')],
+      );
+      final entry = await client.waitForResult('news-1.2', timeout: seconds(5));
+      expect(entry.status, 'sent');
+      expect((await client.messageStatus('news-1.1')).to, ben);
+      final error = await failure<ApiError>(client.messageStatus('news-1'));
+      expect(error.code, 'not_found');
+    });
+
+    test('sendGroup creates a request id', () async {
+      final (server, client) = await pair();
+      final result = await client.sendGroup([ben], 'one');
+      expect(result.requestId, matches(RegExp(r'^[0-9a-f]{32}$')));
+      expect(result.messages.single.requestId, '${result.requestId}.1');
+      expect(server.sent, hasLength(1));
+    });
+
+    test('sendGroup repeats only once', () async {
+      final (server, client) = await pair();
+      final first = await client.sendGroup(
+        [ben, anna],
+        'Same',
+        requestId: 'g-2',
+      );
+      final again = await client.sendGroup(
+        ['0690/876.54.321', anna],
+        'Same',
+        requestId: 'g-2',
+      );
+      expect(again, first);
+      expect(server.sent, hasLength(2));
+      final entry = await client.waitForResult('g-2.1', timeout: seconds(5));
+      expect(entry.status, 'sent');
+      final later = await client.sendGroup(
+        [anna, ben],
+        'Same',
+        requestId: 'g-2',
+      );
+      expect(later.messages[0].status, anyOf('sent', 'delivered'));
+      expect([for (final m in later.messages) m.requestId], ['g-2.1', 'g-2.2']);
+      for (final (to, body) in [
+        ([ben, anna], 'Other'),
+        ([ben], 'Same'),
+      ]) {
+        final error = await failure<ApiError>(
+          client.sendGroup(to, body, requestId: 'g-2'),
+        );
+        expect(error.code, 'invalid_request');
+      }
+      expect(server.sent, hasLength(2));
+    });
+
+    test('sendGroup refuses the whole group', () async {
+      final (server, client) = await pair();
+      final cases = [
+        ([ben, 'abc'], 'Hello', 'invalid_number'),
+        ([ben, anna], 'x' * 1531, 'message_too_long'),
+        ([ben, anna, '+43123456789'], 'x' * 1000, 'invalid_request'),
+        ([ben], 'Hello', 'sim_unavailable'),
+      ];
+      for (final (to, body, code) in cases) {
+        final error = await failure<ApiError>(
+          client.sendGroup(to, body, sim: code == 'sim_unavailable' ? 7 : null),
+        );
+        expect(error.code, code);
+      }
+      expect(server.sent, isEmpty);
+    });
+
+    test('sendGroup goes on after a refused member', () async {
+      final (server, client) = await pair();
+      server.refuseNumbers.add(anna);
+      final result = await client.sendGroup(
+        [ben, anna],
+        'Hello',
+        requestId: 'g-3',
+      );
+      expect([for (final m in result.messages) m.status], ['queued', 'failed']);
+      expect(result.status, 'queued');
+      final entry = await client.waitForResult('g-3.1', timeout: seconds(5));
+      expect(entry.status, 'sent');
+      expect((await client.messageStatus('g-3.2')).status, 'failed');
+      server.refuseNumbers.add(ben);
+      final all = await client.sendGroup(
+        [ben, anna],
+        'Hello',
+        requestId: 'g-4',
+      );
+      expect(all.status, 'failed');
+    });
+
+    test('sendGroup refuses bad values', () async {
+      final (server, client) = await pair();
+      final many = [for (var i = 0; i < 21; i += 1) '+4369900000${i + 10}'];
+      expect(client.sendGroup([], 'Hello'), throwsArgument());
+      expect(client.sendGroup([ben, ' '], 'Hello'), throwsArgument());
+      expect(client.sendGroup([ben], ''), throwsArgument());
+      expect(client.sendGroup(many, 'Hello'), throwsArgument());
+      for (final id in ['', 'a b', 'x' * 62]) {
+        expect(
+          client.sendGroup([ben], 'Hello', requestId: id),
+          throwsArgument(contains('requestId')),
+        );
+      }
+      await Future<void>.delayed(seconds(0.05));
+      expect(server.sent, isEmpty);
     });
 
     test('request ids outlive a restart of the app', () async {
@@ -1168,22 +1307,16 @@ void main() {
       final (server, client) = await pair();
       server.addContact('Zoe Example', '+43660111222');
       List<String> names(Iterable<Contact> contacts) => [
-            for (final contact in contacts) contact.name,
-          ];
+        for (final contact in contacts) contact.name,
+      ];
       final page = await client.contacts();
-      expect(names(page.items), [
-        'Anna Example',
-        'Ben Example',
-        'Zoe Example',
-      ]);
+      expect(names(page.items), ['Anna Example', 'Ben Example', 'Zoe Example']);
       expect(page.items[1].numbers, [
         {'number': ben, 'label': 'Work'},
       ]);
       expect(page.items[1].numbers[0].label, 'Work');
       expect(names((await client.contacts(q: 'zoe')).items), ['Zoe Example']);
-      expect(names((await client.contacts(q: '5678')).items), [
-        'Anna Example',
-      ]);
+      expect(names((await client.contacts(q: '5678')).items), ['Anna Example']);
       final first = await client.contacts(limit: 2);
       expect(first.nextCursor, isNotNull);
       final second = await client.contacts(limit: 2, cursor: first.nextCursor);
@@ -1229,10 +1362,7 @@ void main() {
 
     test('refuses requests over 64 KiB', () async {
       final (server, client) = await pair();
-      expect(
-        client.send(ben, 'x' * 70000),
-        throwsArgument(contains('64 KiB')),
-      );
+      expect(client.send(ben, 'x' * 70000), throwsArgument(contains('64 KiB')));
       await Future<void>.delayed(seconds(0.05));
       expect(actions(server), ['authenticate']);
       expect((await client.ping()).time, greaterThan(0));
@@ -1647,7 +1777,7 @@ void main() {
     test('full event queue drops the oldest', () async {
       final (server, client) = await pair(eventQueueSize: 2);
       server.beforeNextResponse([
-        for (final n in [1, 2, 3, 4]) eventFrame(n)
+        for (final n in [1, 2, 3, 4]) eventFrame(n),
       ]);
       await client.ping();
       expect(client.pendingEvents, 2);
@@ -1919,7 +2049,7 @@ void main() {
       final pauses = recordPauses();
       await failure<ConnectionInterrupted>(client.status());
       expect(pauses, [
-        for (final time in [1, 2, 4, 8, 10, 10]) seconds(time)
+        for (final time in [1, 2, 4, 8, 10, 10]) seconds(time),
       ]);
     });
 

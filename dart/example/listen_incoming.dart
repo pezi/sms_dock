@@ -69,8 +69,9 @@ Future<void> catchUp(SmsDockClient dock) async {
   final missed = dock.missedEvents;
   if (dock.serverRestarted || (missed != null && missed > 0)) {
     // Messages of the same millisecond come again; handle() knows them.
-    final messages =
-        await dock.iterMessages(direction: 'in', since: newest).toList();
+    final messages = await dock
+        .iterMessages(direction: 'in', since: newest)
+        .toList();
     messages.reversed.forEach(handle); // oldest first
   }
 }

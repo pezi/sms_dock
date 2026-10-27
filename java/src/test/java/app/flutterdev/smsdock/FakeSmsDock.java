@@ -99,6 +99,9 @@ final class FakeSmsDock extends WebSocketServer {
     String deleteMode = "hidden";
     final Set<String> failNumbers = Collections.synchronizedSet(new HashSet<>());
 
+    /** Numbers the phone refuses at once ({@code send_refused}); nothing is stored. */
+    final Set<String> refuseNumbers = Collections.synchronizedSet(new HashSet<>());
+
     private final TestCertificate certificate;
     private final Object lock = new Object();
     private final CountDownLatch started = new CountDownLatch(1);
@@ -672,6 +675,8 @@ final class FakeSmsDock extends WebSocketServer {
                 return contactsList(request);
             case "messages.send":
                 return messagesSend(request);
+            case "messages.sendGroup":
+                return messagesSendGroup(request);
             case "subscribe":
                 // subscribe adds the names; its address replaces the filter, and without
                 // address (or with null) the filter is removed.
@@ -937,27 +942,49 @@ final class FakeSmsDock extends WebSocketServer {
             return object("requestId", known.get("requestId"), "to", known.get("to"),
                 "parts", known.get("parts"), "status", known.get("status"));
         }
-        if (sim == null) {
-            sim = 1L;
-        } else {
-            Long wanted = sim;
-            if (sims.stream().noneMatch(s -> wanted.equals(s.get("subscriptionId")))) {
-                throw new Failure("sim_unavailable",
-                    "No SIM with the subscription id " + sim + ".");
-            }
-        }
+        sim = subscription(sim);
         if (requestId == null) {
             requestId = UUID.randomUUID().toString().replace("-", "");
         }
+        return sendResult(accept(requestId, number, body, parts, sim, null));
+    }
+
+    /** Returns the SIM to send with; the first one without {@code sim}. */
+    private Long subscription(Long sim) {
+        if (sim == null) {
+            return 1L;
+        }
+        if (sims.stream().noneMatch(s -> sim.equals(s.get("subscriptionId")))) {
+            throw new Failure("sim_unavailable", "No SIM with the subscription id " + sim + ".");
+        }
+        return sim;
+    }
+
+    /** Queues one message that passed the checks and starts sending it. */
+    private Map<String, Object> accept(String requestId, String number, String body,
+            long parts, Long sim, String group) {
         Map<String, Object> entry = object(
             "requestId", requestId, "to", number, "parts", parts, "partsSent", 0L,
             "status", "queued", "errorCode", null, "messageId", null, "sim", sim,
             "source", "api", "createdAt", System.currentTimeMillis());
         outbox.put(requestId, entry);
         bodies.put(requestId, body);
-        sent.add(object("requestId", requestId, "to", number, "body", body, "sim", sim));
+        Map<String, Object> record = object("requestId", requestId, "to", number,
+            "body", body, "sim", sim);
+        if (group != null) {
+            record.put("group", group);
+        }
+        sent.add(record);
         emit("sms.queued", object("requestId", requestId, "to", number, "parts", parts,
             "sim", sim, "source", "api"));
+        if (refuseNumbers.contains(number)) {
+            // The phone did not even take the message.
+            entry.put("status", "failed");
+            emit("sms.failed", object("requestId", requestId, "id", null,
+                "conversationId", null, "to", number, "errorCode", null,
+                "reason", "send_refused"));
+            return entry;
+        }
         if (parts > 1 && !failNumbers.contains(number)) {
             // Some parts are sent, some are left.
             later(sendDelayMillis / 2, () -> {
@@ -966,8 +993,111 @@ final class FakeSmsDock extends WebSocketServer {
             });
         }
         later(sendDelayMillis, () -> transmit(entry, body));
-        return object("requestId", requestId, "to", number, "parts", parts,
-            "status", "queued");
+        return entry;
+    }
+
+    private static Map<String, Object> sendResult(Map<String, Object> entry) {
+        return object("requestId", entry.get("requestId"), "to", entry.get("to"),
+            "parts", entry.get("parts"), "status", entry.get("status"));
+    }
+
+    private static final List<String> STATUS_ORDER =
+        List.of("queued", "sending", "sent", "delivered");
+
+    /** The GroupSendResult of {@code members}, as the app builds it. */
+    private static Map<String, Object> groupResult(String requestId,
+            List<Map<String, Object>> members) {
+        String status = members.stream()
+            .map(m -> (String) m.get("status"))
+            .filter(value -> !"failed".equals(value))
+            .min((a, b) -> Integer.compare(STATUS_ORDER.indexOf(a), STATUS_ORDER.indexOf(b)))
+            .orElse("failed");
+        List<Object> numbers = new ArrayList<>();
+        List<Object> results = new ArrayList<>();
+        for (Map<String, Object> member : members) {
+            numbers.add(member.get("to"));
+            results.add(sendResult(member));
+        }
+        return object("requestId", requestId, "to", numbers, "parts", members.get(0).get("parts"),
+            "status", status, "messages", results);
+    }
+
+    /** The members of a group sent before, oldest first; empty for an unknown group. */
+    private List<Map<String, Object>> knownGroup(String requestId) {
+        List<Map<String, Object>> members = new ArrayList<>();
+        for (int index = 1; outbox.containsKey(requestId + "." + index); index++) {
+            members.add(outbox.get(requestId + "." + index));
+        }
+        return members;
+    }
+
+    private Map<String, Object> messagesSendGroup(Map<String, Object> request) {
+        List<?> to = required(request, "to", List.class);
+        String body = required(request, "body", String.class);
+        Long sim = optional(request, "sim", Long.class);
+        String requestId = optional(request, "requestId", String.class);
+        if (to.isEmpty()) {
+            throw new Failure("invalid_request", "'to' is missing.");
+        }
+        List<String> numbers = new ArrayList<>();
+        for (Object item : to) {
+            if (!(item instanceof String)) {
+                throw new Failure("invalid_request", "'to' must contain strings.");
+            }
+            String number = normalizeNumber((String) item);
+            if (!NUMBER.matcher(number).matches()) {
+                throw new Failure("invalid_number",
+                    "'to' contains '" + item + "', which is not a phone number.");
+            }
+            if (numbers.stream().noneMatch(known -> samePeer(known, number))) {
+                numbers.add(number);
+            }
+        }
+        if (numbers.size() > 20) {
+            throw new Failure("invalid_request",
+                "A group message goes to at most 20 recipients.");
+        }
+        if (body.isEmpty()) {
+            throw new Failure("invalid_request", "'body' is empty.");
+        }
+        long parts = countParts(body);
+        if (parts > 10) {
+            throw new Failure("message_too_long",
+                "The message needs " + parts + " SMS parts; at most 10 are allowed.");
+        }
+        if (requestId != null
+                && (!REQUEST_ID.matcher(requestId).matches() || requestId.length() > 61)) {
+            throw new Failure("invalid_request",
+                "'requestId' of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -.");
+        }
+        if (requestId == null) {
+            requestId = UUID.randomUUID().toString().replace("-", "");
+        }
+        List<Map<String, Object>> known = knownGroup(requestId);
+        if (!known.isEmpty()) {
+            boolean same = known.size() == numbers.size()
+                && known.stream().allMatch(m -> bodies.get(m.get("requestId")).equals(body))
+                && numbers.stream().allMatch(number -> known.stream()
+                    .anyMatch(m -> samePeer((String) m.get("to"), number)));
+            if (!same) {
+                throw new Failure("invalid_request",
+                    "'requestId' was already used for another message.");
+            }
+            return groupResult(requestId, known);
+        }
+        long total = parts * numbers.size();
+        if (total > 20) {
+            throw new Failure("invalid_request", "This group needs " + total
+                + " SMS parts; at most 20 can be sent per minute. Send to fewer recipients "
+                + "or shorten the text.");
+        }
+        Long subscription = subscription(sim);
+        List<Map<String, Object>> members = new ArrayList<>();
+        for (int index = 0; index < numbers.size(); index++) {
+            members.add(accept(requestId + "." + (index + 1), numbers.get(index), body, parts,
+                subscription, requestId));
+        }
+        return groupResult(requestId, members);
     }
 
     private void transmit(Map<String, Object> entry, String body) {

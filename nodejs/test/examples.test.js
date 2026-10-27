@@ -71,7 +71,10 @@ describe('reply guard', () => {
 
 describe('examples', needTls, () => {
   test('usage', async () => {
-    const names = ['list_messages.mjs', 'send_sms.mjs', 'listen_incoming.mjs', 'auto_reply.mjs'];
+    const names = [
+      'list_messages.mjs', 'send_sms.mjs', 'send_group_sms.mjs', 'listen_incoming.mjs',
+      'auto_reply.mjs',
+    ];
     for (const name of names) {
       const { code, out } = await runExample(name, null);
       assert.equal(code, 2, name);
@@ -103,6 +106,26 @@ describe('examples', needTls, () => {
     ({ code, out } = await runExample('send_sms.mjs', server, ['+43123456', 'Hello']));
     assert.equal(code, 1);
     assert.match(out, /Failed, error code 1\n$/);
+  });
+
+  test('send_group_sms', async (t) => {
+    const server = await startServer(t);
+    server.refuseNumbers.add(ANNA);
+    let { code, out, err } = await runExample('send_group_sms.mjs', server, ['Hello all', BEN, ANNA]);
+    assert.equal(code, 1, err);
+    const lines = out.trimEnd().split('\n');
+    assert.equal(lines[0], '2 recipient(s), 1 part(s) each');
+    assert.match(lines[1], new RegExp(`^\\${BEN}: sent, message id \\d+$`));
+    assert.equal(lines[2], `${ANNA}: refused by the phone`);
+    assert.deepEqual(
+      server.sent.map((m) => [m.to, m.body]),
+      [[BEN, 'Hello all'], [ANNA, 'Hello all']],
+    );
+
+    ({ code, out } = await runExample('send_group_sms.mjs', server, ['Hello', BEN, 'abc']));
+    assert.equal(code, 1);
+    assert.match(out, /^Not sent: invalid_number: /);
+    assert.equal(server.sent.length, 2);
   });
 
   test('examples report a wrong fingerprint', async (t) => {

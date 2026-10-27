@@ -215,6 +215,8 @@ export class FakeSmsDock {
     /** requestId → outbox entry */
     this.outbox = new Map();
     this.failNumbers = new Set();
+    /** Numbers the phone refuses at once (`send_refused`). */
+    this.refuseNumbers = new Set();
     /** Messages handed to the (imaginary) radio, one entry per SMS. */
     this.sent = [];
     /** Every request object received and not refused, in order. */
@@ -712,6 +714,8 @@ export class FakeSmsDock {
         return this._contactsList(request);
       case 'messages.send':
         return this._messagesSend(request);
+      case 'messages.sendGroup':
+        return this._messagesSendGroup(request);
       case 'subscribe':
         return this._subscribe(client, request);
       case 'unsubscribe':
@@ -990,14 +994,26 @@ export class FakeSmsDock {
         status: known.status,
       };
     }
-    if (sim === null) {
-      sim = this.sims.find((s) => s.isDefault).subscriptionId;
-    } else if (this.sims.every((s) => s.subscriptionId !== sim)) {
-      throw new Failure('sim_unavailable', `No SIM with the subscription id ${sim}.`);
-    }
+    sim = this._subscription(sim);
     if (requestId === null) {
       requestId = randomUUID().replaceAll('-', '');
     }
+    return sendResult(this._accept(requestId, number, body, parts, sim));
+  }
+
+  /** Returns the SIM to send with; the default one without `sim`. */
+  _subscription(sim) {
+    if (sim === null) {
+      return this.sims.find((s) => s.isDefault).subscriptionId;
+    }
+    if (this.sims.every((s) => s.subscriptionId !== sim)) {
+      throw new Failure('sim_unavailable', `No SIM with the subscription id ${sim}.`);
+    }
+    return sim;
+  }
+
+  /** Queues one message that passed the checks and starts sending it. */
+  _accept(requestId, number, body, parts, sim, group = null) {
     const entry = {
       requestId,
       to: number,
@@ -1012,10 +1028,115 @@ export class FakeSmsDock {
     };
     this.outbox.set(requestId, entry);
     this._bodies.set(requestId, body);
-    this.sent.push({ requestId, to: number, body, sim });
+    const sent = { requestId, to: number, body, sim };
+    if (group !== null) {
+      sent.group = group;
+    }
+    this.sent.push(sent);
     this.emit('sms.queued', { requestId, to: number, parts, sim, source: 'api' });
+    if (this.refuseNumbers.has(number)) {
+      // The phone did not even take the message.
+      entry.status = 'failed';
+      this.emit('sms.failed', {
+        requestId,
+        id: null,
+        conversationId: null,
+        to: number,
+        errorCode: null,
+        reason: 'send_refused',
+      });
+      return entry;
+    }
     this._transmit(entry, body);
-    return { requestId, to: number, parts, status: 'queued' };
+    return entry;
+  }
+
+  _messagesSendGroup(request) {
+    const to = request.to;
+    if (to === null || to === undefined || (typeof to === 'string' && to === '')) {
+      throw new Failure('invalid_request', "The field 'to' is missing.");
+    }
+    const list = typeof to === 'string' ? [to] : to;
+    if (!Array.isArray(list) || list.some((item) => typeof item !== 'string')) {
+      throw new Failure('invalid_request', "'to' must contain strings.");
+    }
+    const body = required(request, 'body', 'string');
+    let sim = optional(request, 'sim', 'integer');
+    let requestId = optional(request, 'requestId', 'string');
+    if (list.length === 0) {
+      throw new Failure('invalid_request', "'to' is missing.");
+    }
+    const numbers = [];
+    for (const item of list) {
+      const number = normalizeNumber(item);
+      if (!NUMBER.test(number)) {
+        throw new Failure(
+          'invalid_number',
+          `'to' contains '${item}', which is not a phone number.`,
+        );
+      }
+      if (!numbers.some((known) => samePeer(known, number))) {
+        numbers.push(number);
+      }
+    }
+    if (numbers.length > 20) {
+      throw new Failure('invalid_request', 'A group message goes to at most 20 recipients.');
+    }
+    if (!body) {
+      throw new Failure('invalid_request', "'body' is empty.");
+    }
+    const parts = countParts(body);
+    if (parts > 10) {
+      throw new Failure(
+        'message_too_long',
+        `The message needs ${parts} SMS parts; at most 10 are allowed.`,
+      );
+    }
+    if (requestId !== null && (!REQUEST_ID.test(requestId) || requestId.length > 61)) {
+      throw new Failure(
+        'invalid_request',
+        "'requestId' of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -.",
+      );
+    }
+    if (requestId === null) {
+      requestId = randomUUID().replaceAll('-', '');
+    }
+    const known = this._knownGroup(requestId);
+    if (known.length > 0) {
+      const same =
+        known.length === numbers.length &&
+        known.every((member) => this._bodies.get(member.requestId) === body) &&
+        numbers.every((number) => known.some((member) => samePeer(member.to, number)));
+      if (!same) {
+        throw new Failure(
+          'invalid_request',
+          "'requestId' was already used for another message.",
+        );
+      }
+      return groupResult(requestId, known);
+    }
+    const total = parts * numbers.length;
+    if (total > 20) {
+      throw new Failure(
+        'invalid_request',
+        `This group needs ${total} SMS parts; at most 20 can be sent per minute. ` +
+          'Send to fewer recipients or shorten the text.',
+      );
+    }
+    sim = this._subscription(sim);
+    const members = numbers.map((number, index) =>
+      this._accept(`${requestId}.${index + 1}`, number, body, parts, sim, requestId),
+    );
+    return groupResult(requestId, members);
+  }
+
+  /** Returns the members of a group sent before, oldest first. */
+  _knownGroup(requestId) {
+    const members = [];
+    for (let index = 1; this.outbox.has(`${requestId}.${index}`); index += 1) {
+      members.push(this.outbox.get(`${requestId}.${index}`));
+    }
+    return members;
   }
 
   _transmit(entry, body) {
@@ -1156,6 +1277,30 @@ function push(map, key, value) {
 
 function newestFirst(a, b) {
   return b.timestamp - a.timestamp || b.id - a.id;
+}
+
+const STATUS_ORDER = ['queued', 'sending', 'sent', 'delivered'];
+
+function sendResult(entry) {
+  return { requestId: entry.requestId, to: entry.to, parts: entry.parts, status: entry.status };
+}
+
+/** Returns the GroupSendResult of `members` as the app builds it. */
+function groupResult(requestId, members) {
+  const alive = members.filter((member) => member.status !== 'failed');
+  const status =
+    alive.length === 0
+      ? 'failed'
+      : alive
+          .map((member) => member.status)
+          .sort((a, b) => STATUS_ORDER.indexOf(a) - STATUS_ORDER.indexOf(b))[0];
+  return {
+    requestId,
+    to: members.map((member) => member.to),
+    parts: members[0].parts,
+    status,
+    messages: members.map(sendResult),
+  };
 }
 
 function required(request, name, kind) {

@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import datetime
 from typing import Any, Callable, Union
 from urllib.parse import urlsplit
@@ -33,6 +33,7 @@ from .models import (
     Conversation,
     ConversationPage,
     DeleteResult,
+    GroupSendResult,
     Event,
     MarkReadResult,
     Message,
@@ -82,6 +83,10 @@ ReconnectHook = Callable[["SmsDockClient"], None]
 Timestamp = Union[int, float, datetime]
 
 _REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_GROUP_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,61}")
+
+#: Recipients of one group message at most.
+MAX_GROUP_RECIPIENTS = 20
 _FINGERPRINT_PATTERN = re.compile(r"[0-9a-f]{64}")
 _DIRECTIONS = ("in", "out", "all")
 _TRANSPORT_ERRORS = (WebSocketException, OSError)
@@ -766,6 +771,67 @@ class SmsDockClient:
             parameters["sim"] = _integer(sim, "sim")
         return self.request(  # type: ignore[return-value]
             "messages.send", **parameters
+        )
+
+    def send_group(
+        self,
+        to: Sequence[str],
+        body: str,
+        *,
+        sim: int | None = None,
+        request_id: str | None = None,
+    ) -> GroupSendResult:
+        """Send one text to several numbers, one SMS each.
+
+        ``to`` holds 1 to 20 phone numbers; repeated numbers are sent
+        once. Every recipient gets a separate SMS and does not see the
+        others. The result is a :class:`~smsdock.models.GroupSendResult`
+        with one :class:`~smsdock.models.SendResult` per recipient; their
+        request ids are ``<request_id>.1``, ``<request_id>.2`` and so on,
+        and :meth:`wait_for_result` and :meth:`message_status` take them
+        like those of single messages.
+
+        The phone checks the whole group before it sends anything: a
+        number that is not a phone number (``invalid_number``), a text
+        that is too long, fewer messages left in the daily limit of the
+        free version than the group has recipients (``quota_exceeded``)
+        or more SMS parts than the 20 of one minute, parts times
+        recipients (``invalid_request``), refuse the whole group. A
+        refusal by the phone for one recipient does not stop the others;
+        that member has the status ``failed`` in ``messages``.
+
+        ``request_id`` has at most 61 characters here, so that the member
+        suffix fits, and works as for :meth:`send`: the same id with the
+        same text and numbers is not sent again but answered with the
+        stored members and their current status.
+        """
+
+        if isinstance(to, str) or not isinstance(to, Sequence) or not to:
+            raise ValueError("'to' must be a list of phone numbers")
+        if any(not isinstance(number, str) or not number.strip() for number in to):
+            raise ValueError("'to' must be a list of phone numbers")
+        if len(to) > MAX_GROUP_RECIPIENTS:
+            raise ValueError(
+                f"'to' holds more than {MAX_GROUP_RECIPIENTS} numbers"
+            )
+        if not isinstance(body, str) or not body:
+            raise ValueError("'body' must be a text")
+        if request_id is None:
+            request_id = uuid.uuid4().hex
+        elif not _GROUP_REQUEST_ID_PATTERN.fullmatch(request_id):
+            raise ValueError(
+                "request_id of a group must be 1 to 61 characters of "
+                "A-Z a-z 0-9 . _ -"
+            )
+        parameters: JsonObject = {
+            "to": list(to),
+            "body": body,
+            "requestId": request_id,
+        }
+        if sim is not None:
+            parameters["sim"] = _integer(sim, "sim")
+        return self.request(  # type: ignore[return-value]
+            "messages.sendGroup", **parameters
         )
 
     def message_status(self, request_id: str) -> OutboxEntry:

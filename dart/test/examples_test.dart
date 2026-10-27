@@ -19,23 +19,22 @@ import 'helpers.dart';
 
 /// Returns the environment of an example process.
 Map<String, String> environment(TlsFiles tls) => {
-      'SMSDOCK_PASSWORD': password,
-      'SMSDOCK_FINGERPRINT': tls.fingerprint,
-    };
+  'SMSDOCK_PASSWORD': password,
+  'SMSDOCK_FINGERPRINT': tls.fingerprint,
+};
 
 /// Runs an example to its end.
 Future<ProcessResult> runExample(
   String name,
   List<String> arguments, {
   Map<String, String>? variables,
-}) =>
-    Process.run(
-      Platform.resolvedExecutable,
-      ['example/$name', ...arguments],
-      environment: variables ?? environment(tlsFiles!),
-      stdoutEncoding: utf8,
-      stderrEncoding: utf8,
-    ).timeout(const Duration(seconds: 60));
+}) => Process.run(
+  Platform.resolvedExecutable,
+  ['example/$name', ...arguments],
+  environment: variables ?? environment(tlsFiles!),
+  stdoutEncoding: utf8,
+  stderrEncoding: utf8,
+).timeout(const Duration(seconds: 60));
 
 /// An example that runs until it is stopped.
 class Running {
@@ -108,13 +107,10 @@ class StreamGroup extends Stream<List<int>> {
 
 /// Starts an example that runs until it is stopped.
 Future<Running> startExample(String name, FakeSmsDock server) async {
-  final process = await Process.start(
-      Platform.resolvedExecutable,
-      [
-        'example/$name',
-        server.url,
-      ],
-      environment: environment(server.tls));
+  final process = await Process.start(Platform.resolvedExecutable, [
+    'example/$name',
+    server.url,
+  ], environment: environment(server.tls));
   addTearDown(process.kill);
   return Running(process);
 }
@@ -156,6 +152,39 @@ void main() {
       );
     });
 
+    test('send_group_sms', () async {
+      final server = await startServer();
+      server.refuseNumbers.add(anna);
+      final result = await runExample('send_group_sms.dart', [
+        server.url,
+        'Hello all',
+        ben,
+        anna,
+      ]);
+      expect(result.exitCode, 1, reason: '${result.stderr}');
+      final lines = const LineSplitter().convert(result.stdout as String);
+      expect(lines[0], '2 recipient(s), 1 part(s) each');
+      expect(lines[1], startsWith('$ben: sent, message id '));
+      expect(lines[2], '$anna: refused by the phone');
+      expect(
+        [for (final message in server.sent) (message['to'], message['body'])],
+        [(ben, 'Hello all'), (anna, 'Hello all')],
+      );
+    });
+
+    test('send_group_sms refused', () async {
+      final server = await startServer();
+      final result = await runExample('send_group_sms.dart', [
+        server.url,
+        'Hello',
+        ben,
+        'abc',
+      ]);
+      expect(result.exitCode, 1);
+      expect(result.stdout, startsWith('Not sent: invalid_number'));
+      expect(server.sent, isEmpty);
+    });
+
     test('send_sms refused', () async {
       final server = await startServer();
       final result = await runExample('send_sms.dart', [
@@ -184,6 +213,7 @@ void main() {
     for (final name in [
       'list_messages.dart',
       'send_sms.dart',
+      'send_group_sms.dart',
       'listen_incoming.dart',
       'auto_reply.dart',
     ]) {

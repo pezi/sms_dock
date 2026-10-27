@@ -355,6 +355,114 @@ public class ActionsTests : ServerTestBase
     }
 
     [Fact]
+    public async Task SendGroup()
+    {
+        var client = await ConnectAsync();
+        var result = await client.SendGroupAsync(
+            ["+43 690 876-54321", Anna, Ben], "Hello all", sim: 2, requestId: "news-1");
+        Assert.Equal("news-1", result.RequestId);
+        Assert.Equal([Ben, Anna], result.To);
+        Assert.Equal(1, result.Parts);
+        Assert.Equal("queued", result.Status);
+        Assert.Equal(0, result.FailedCount);
+        Assert.Equal(
+            [("news-1.1", Ben, 1L, "queued"), ("news-1.2", Anna, 1L, "queued")],
+            result.Messages.Select(member => (member.RequestId, member.To, member.Parts, member.Status)));
+        AssertJson(
+            $$"""
+            {"id":"cs-2","action":"messages.sendGroup","to":["+43 690 876-54321","{{Anna}}","{{Ben}}"],
+             "body":"Hello all","requestId":"news-1","sim":2}
+            """,
+            LastRequest(Server, "messages.sendGroup"));
+        Assert.Equal(
+            [("news-1.1", Ben, 2L, "news-1"), ("news-1.2", Anna, 2L, "news-1")],
+            Server.Sent.Select(sent =>
+                ((string?)sent["requestId"], (string?)sent["to"], (long?)sent["sim"], (string?)sent["group"])));
+        Assert.Equal("sent", (await client.WaitForResultAsync("news-1.2", TimeSpan.FromSeconds(5))).Status);
+        Assert.Equal(Ben, (await client.MessageStatusAsync("news-1.1")).To);
+        var error = await Assert.ThrowsAsync<ApiException>(() => client.MessageStatusAsync("news-1"));
+        Assert.Equal("not_found", error.Code);
+    }
+
+    [Fact]
+    public async Task SendGroupCreatesARequestId()
+    {
+        var client = await ConnectAsync();
+        var result = await client.SendGroupAsync([Ben], "one");
+        Assert.Matches("^[0-9a-f]{32}$", result.RequestId);
+        Assert.Equal(result.RequestId + ".1", Assert.Single(result.Messages).RequestId);
+    }
+
+    [Fact]
+    public async Task SendGroupRepeatsOnlyOnce()
+    {
+        var client = await ConnectAsync();
+        var first = await client.SendGroupAsync([Ben, Anna], "Same", requestId: "news-2");
+        var again = await client.SendGroupAsync(["0690/876.54.321", Anna], "Same", requestId: "news-2");
+        AssertJson(first.Json.ToJsonString(), again.Json);
+        Assert.Equal(2, Server.Sent.Count);
+        Assert.Equal("sent", (await client.WaitForResultAsync("news-2.1", TimeSpan.FromSeconds(5))).Status);
+        var later = await client.SendGroupAsync([Anna, Ben], "Same", requestId: "news-2");
+        Assert.Contains(later.Messages[0].Status, new[] { "sent", "delivered" });
+        Assert.Equal(["news-2.1", "news-2.2"], later.Messages.Select(member => member.RequestId));
+        foreach (var (to, body) in new[] { (new[] { Ben, Anna }, "Other"), (new[] { Ben }, "Same") })
+        {
+            var error = await Assert.ThrowsAsync<ApiException>(
+                () => client.SendGroupAsync(to, body, requestId: "news-2"));
+            Assert.Equal("invalid_request", error.Code);
+        }
+        Assert.Equal(2, Server.Sent.Count);
+    }
+
+    [Fact]
+    public async Task SendGroupRefusesTheWholeGroup()
+    {
+        var client = await ConnectAsync();
+        (string[] To, string Body, string Code)[] cases =
+        [
+            ([Ben, "abc"], "Hello", "invalid_number"),
+            ([Ben, Anna], new string('x', 1531), "message_too_long"),
+            ([Ben, Anna, "+43123456789"], new string('x', 1000), "invalid_request"),
+        ];
+        foreach (var (to, body, code) in cases)
+        {
+            var error = await Assert.ThrowsAsync<ApiException>(() => client.SendGroupAsync(to, body));
+            Assert.Equal(code, error.Code);
+        }
+        Assert.Empty(Server.Sent);
+    }
+
+    [Fact]
+    public async Task SendGroupGoesOnAfterARefusedMember()
+    {
+        var client = await ConnectAsync();
+        Server.RefuseNumber(Anna);
+        var result = await client.SendGroupAsync([Ben, Anna], "Hello", requestId: "news-3");
+        Assert.Equal(["queued", "failed"], result.Messages.Select(member => member.Status));
+        Assert.Equal("queued", result.Status);
+        Assert.Equal(1, result.FailedCount);
+        Assert.Equal("sent", (await client.WaitForResultAsync("news-3.1", TimeSpan.FromSeconds(5))).Status);
+        Assert.Equal("failed", (await client.MessageStatusAsync("news-3.2")).Status);
+        Server.RefuseNumber(Ben);
+        Assert.Equal("failed", (await client.SendGroupAsync([Ben, Anna], "Hello", requestId: "news-4")).Status);
+    }
+
+    [Theory]
+    [InlineData(new string[0], "Hello", null)]
+    [InlineData(new[] { Ben, "" }, "Hello", null)]
+    [InlineData(new[] { Ben }, "", null)]
+    [InlineData(new[] { Ben }, "Hello", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")]
+    [InlineData(new[] { Ben }, "Hello", "has space")]
+    public async Task SendGroupRefusesBadValues(string[] to, string body, string? requestId)
+    {
+        var client = await ConnectAsync();
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SendGroupAsync(to, body, requestId: requestId));
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => client.SendGroupAsync(Enumerable.Repeat(Ben, 21).ToList(), "Hello"));
+        Assert.Empty(Server.Sent);
+    }
+
+    [Fact]
     public async Task RepeatAfterAFailureDoesNotSendAgain()
     {
         var client = await ConnectAsync();

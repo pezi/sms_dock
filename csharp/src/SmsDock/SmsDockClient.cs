@@ -538,6 +538,73 @@ public sealed partial class SmsDockClient : IAsyncDisposable
             await RequestAsync("messages.send", fields, cancellationToken: cancellationToken).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// Sends one text to several numbers, one SMS each. Every recipient gets a separate SMS and
+    /// does not see the others. The messages are on their way when this method returns; use
+    /// <see cref="WaitForResultAsync"/> with the request id of each member for the outcome.
+    /// </summary>
+    /// <remarks>
+    /// The phone checks the whole group before it sends anything: a number that is not a phone
+    /// number (<c>invalid_number</c>), a text that is too long, fewer messages left in the daily
+    /// limit of the free version than the group has recipients (<c>quota_exceeded</c>) or more
+    /// SMS parts than the 20 of one minute, parts times recipients (<c>invalid_request</c>),
+    /// refuse the whole group. A refusal by the phone for one recipient does not stop the
+    /// others; that member has the status <c>failed</c> in <see cref="GroupSendResult.Messages"/>.
+    /// <paramref name="requestId"/> works as for <see cref="SendAsync"/>, for the whole group:
+    /// the same id with the same text and numbers is not sent again but answered with the
+    /// stored members and their current status.
+    /// </remarks>
+    /// <param name="to">1 to 20 phone numbers; repeated numbers are sent once.</param>
+    /// <param name="body">The text, at most 10 SMS parts.</param>
+    /// <param name="sim">Subscription id of the SIM for every message; default is the SMS SIM of the phone.</param>
+    /// <param name="requestId">
+    /// Your own id of the group: 1 to 61 characters of <c>A-Z a-z 0-9 . _ -</c>. The members get
+    /// <c>requestId.1</c>, <c>requestId.2</c> and so on.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    public async Task<GroupSendResult> SendGroupAsync(
+        IReadOnlyList<string> to,
+        string body,
+        long? sim = null,
+        string? requestId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (to is null || to.Count == 0 || to.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("'to' must be a list of phone numbers");
+        }
+        if (to.Count > SmsDockApi.MaxGroupRecipients)
+        {
+            throw new ArgumentException($"'to' holds more than {SmsDockApi.MaxGroupRecipients} numbers");
+        }
+        if (string.IsNullOrEmpty(body))
+        {
+            throw new ArgumentException("'body' must be a text");
+        }
+        if (requestId is null)
+        {
+            requestId = Guid.NewGuid().ToString("N");
+        }
+        else if (!GroupRequestIdPattern().IsMatch(requestId))
+        {
+            throw new ArgumentException(
+                "request_id of a group must be 1 to 61 characters of A-Z a-z 0-9 . _ -");
+        }
+        var numbers = new JsonArray();
+        foreach (var number in to)
+        {
+            numbers.Add(number);
+        }
+        var fields = new JsonObject { ["to"] = numbers, ["body"] = body, ["requestId"] = requestId };
+        if (sim is { } subscription)
+        {
+            fields["sim"] = subscription;
+        }
+        return new GroupSendResult(
+            await RequestAsync("messages.sendGroup", fields, cancellationToken: cancellationToken)
+                .ConfigureAwait(false));
+    }
+
     /// <summary>Returns the outbox entry of a message sent through SMS Dock.</summary>
     /// <param name="requestId">The id of the request.</param>
     /// <param name="cancellationToken">Cancels the operation.</param>
@@ -1412,4 +1479,7 @@ public sealed partial class SmsDockClient : IAsyncDisposable
 
     [GeneratedRegex(@"\A[A-Za-z0-9._-]{1,64}\z")]
     private static partial Regex RequestIdPattern();
+
+    [GeneratedRegex(@"\A[A-Za-z0-9._-]{1,61}\z")]
+    private static partial Regex GroupRequestIdPattern();
 }

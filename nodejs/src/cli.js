@@ -190,6 +190,37 @@ const COMMANDS = {
     ],
     run: send,
   },
+  'send-group': {
+    help: 'send one text to several numbers, one SMS each',
+    description:
+      'Send the same text to several numbers as separate SMS. Without --text ' +
+      'the text is read from standard input.',
+    options: [
+      {
+        name: 'to',
+        metavar: 'NUMBER',
+        required: true,
+        several: true,
+        help: 'phone number of a recipient; repeat for every recipient (at most 20)',
+      },
+      { name: 'text', metavar: 'TEXT', help: 'text of the message' },
+      { name: 'sim', metavar: 'ID', convert: int, help: 'subscription id of the SIM' },
+      {
+        name: 'request-id',
+        metavar: 'ID',
+        help: 'your own id of the group; the same id is sent only once',
+      },
+      { name: 'wait', flag: true, help: 'wait until every message was sent or failed' },
+      {
+        name: 'wait-timeout',
+        metavar: 'SECONDS',
+        convert: float,
+        fallback: 60,
+        help: 'longest time to wait with --wait (default: 60)',
+      },
+    ],
+    run: sendGroup,
+  },
   delete: {
     help: 'delete a message or a conversation',
     options: [
@@ -896,7 +927,8 @@ async function messages(client, args) {
   return EXIT_OK;
 }
 
-async function send(client, args) {
+/** Returns the text to send: `--text` or standard input. */
+async function textOf(args) {
   let text = args.text;
   if (text === null) {
     if (process.stdin.isTTY) {
@@ -910,6 +942,11 @@ async function send(client, args) {
   if (!text) {
     throw new UsageError('The text is empty.');
   }
+  return text;
+}
+
+async function send(client, args) {
+  const text = await textOf(args);
   let result = await client.send(args.to, text, {
     sim: args.sim,
     requestId: args.requestId,
@@ -934,6 +971,54 @@ async function send(client, args) {
     );
   }
   return failed ? EXIT_API_ERROR : EXIT_OK;
+}
+
+async function sendGroup(client, args) {
+  const text = await textOf(args);
+  const result = await client.sendGroup(args.to, text, {
+    sim: args.sim,
+    requestId: args.requestId,
+  });
+  let members = result.messages;
+  if (args.wait) {
+    const deadline = Date.now() + args.waitTimeout * 1000;
+    const waited = [];
+    for (const member of members) {
+      if (member.status === 'failed') {
+        waited.push(member);
+        continue;
+      }
+      const timeout = Math.max(0, (deadline - Date.now()) / 1000);
+      waited.push(await client.waitForResult(member.requestId, { timeout }));
+    }
+    members = waited;
+    result.messages = members;
+  }
+  const failed = members.filter((member) => member.status === 'failed');
+  if (args.json) {
+    printJson(result);
+  } else {
+    print(
+      `Group ${show(result.requestId)}: ${members.length} recipient(s), ` +
+        `${show(result.parts)} part(s) each`,
+    );
+    for (const member of members) {
+      if (member.status === 'failed') {
+        const code = member.errorCode;
+        const cause = code === null || code === undefined ? '' : `, error code ${code}`;
+        print(`  Failed: ${show(member.to)}${cause}, requestId ${show(member.requestId)}`);
+      } else {
+        print(
+          `  ${capitalize(show(member.status))}: ${show(member.to)}, ` +
+            `requestId ${show(member.requestId)}`,
+        );
+      }
+    }
+    if (failed.length > 0) {
+      complain(`${failed.length} of ${members.length} message(s) failed`);
+    }
+  }
+  return failed.length > 0 ? EXIT_API_ERROR : EXIT_OK;
 }
 
 async function remove(client, args) {

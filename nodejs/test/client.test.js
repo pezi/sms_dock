@@ -852,6 +852,115 @@ describe('requests', needTls, () => {
     assert.deepEqual(server.actions(), ['authenticate']);
   });
 
+  test('sendGroup', async (t) => {
+    const { server, client } = await pair(t);
+    const result = await client.sendGroup(['+43 690 876-54321', ANNA, BEN], 'Hello all', {
+      sim: 2,
+      requestId: 'news-1',
+    });
+    assert.deepEqual(result, {
+      requestId: 'news-1',
+      to: [BEN, ANNA],
+      parts: 1,
+      status: 'queued',
+      messages: [
+        { requestId: 'news-1.1', to: BEN, parts: 1, status: 'queued' },
+        { requestId: 'news-1.2', to: ANNA, parts: 1, status: 'queued' },
+      ],
+    });
+    assert.deepEqual(lastRequest(server, 'messages.sendGroup'), {
+      id: 'js-2',
+      action: 'messages.sendGroup',
+      to: ['+43 690 876-54321', ANNA, BEN],
+      body: 'Hello all',
+      sim: 2,
+      requestId: 'news-1',
+    });
+    assert.deepEqual(
+      server.sent.map((m) => [m.requestId, m.to, m.sim, m.group]),
+      [['news-1.1', BEN, 2, 'news-1'], ['news-1.2', ANNA, 2, 'news-1']],
+    );
+    assert.equal((await client.waitForResult('news-1.2', { timeout: 5 })).status, 'sent');
+    assert.equal((await client.messageStatus('news-1.1')).to, BEN);
+    await assert.rejects(client.messageStatus('news-1'), (error) => {
+      return error instanceof ApiError && error.code === 'not_found';
+    });
+    // Without a requestId the client creates one.
+    const second = await client.sendGroup([BEN], 'one');
+    assert.match(second.requestId, /^[0-9a-f]{32}$/);
+    assert.equal(second.messages[0].requestId, `${second.requestId}.1`);
+  });
+
+  test('sendGroup repeats only once', async (t) => {
+    const { server, client } = await pair(t);
+    const options = { requestId: 'news-2' };
+    const first = await client.sendGroup([BEN, ANNA], 'Same', options);
+    assert.deepEqual(await client.sendGroup(['0690/876.54.321', ANNA], 'Same', options), first);
+    assert.equal(server.sent.length, 2);
+    assert.equal((await client.waitForResult('news-2.1', { timeout: 5 })).status, 'sent');
+    const later = await client.sendGroup([ANNA, BEN], 'Same', options);
+    assert.ok(['sent', 'delivered'].includes(later.messages[0].status));
+    assert.deepEqual(
+      later.messages.map((m) => m.requestId),
+      ['news-2.1', 'news-2.2'],
+    );
+    for (const [to, body] of [[[BEN, ANNA], 'Other'], [[BEN], 'Same']]) {
+      await assert.rejects(client.sendGroup(to, body, options), (error) => {
+        return error instanceof ApiError && error.code === 'invalid_request';
+      });
+    }
+    assert.equal(server.sent.length, 2);
+  });
+
+  test('sendGroup refuses the whole group', async (t) => {
+    const { server, client } = await pair(t);
+    for (const [to, body, code] of [
+      [[BEN, 'abc'], 'Hello', 'invalid_number'],
+      [[BEN, ANNA], 'x'.repeat(1531), 'message_too_long'],
+      [[BEN, ANNA, '+43123456789'], 'x'.repeat(1000), 'invalid_request'],
+    ]) {
+      await assert.rejects(client.sendGroup(to, body), (error) => {
+        return error instanceof ApiError && error.code === code;
+      });
+    }
+    assert.deepEqual(server.sent, []);
+  });
+
+  test('sendGroup goes on after a refused member', async (t) => {
+    const { server, client } = await pair(t);
+    server.refuseNumbers.add(ANNA);
+    const result = await client.sendGroup([BEN, ANNA], 'Hello', { requestId: 'news-3' });
+    assert.deepEqual(
+      result.messages.map((m) => m.status),
+      ['queued', 'failed'],
+    );
+    assert.equal(result.status, 'queued');
+    assert.equal((await client.waitForResult('news-3.1', { timeout: 5 })).status, 'sent');
+    assert.equal((await client.messageStatus('news-3.2')).status, 'failed');
+    server.refuseNumbers.add(BEN);
+    const all = await client.sendGroup([BEN, ANNA], 'Hello', { requestId: 'news-4' });
+    assert.equal(all.status, 'failed');
+  });
+
+  test('sendGroup refuses bad values', async (t) => {
+    const { server, client } = await pair(t);
+    const twentyOne = Array.from({ length: 21 }, (_, i) => `+4369900000${10 + i}`);
+    for (const [to, body, requestId] of [
+      ['+43123', 'Hello', undefined],
+      [[], 'Hello', undefined],
+      [[BEN, ''], 'Hello', undefined],
+      [[BEN, 5], 'Hello', undefined],
+      [[BEN], '', undefined],
+      [[BEN], 'Hello', 'x'.repeat(62)],
+      [[BEN], 'Hello', 'has space'],
+      [twentyOne, 'Hello', undefined],
+    ]) {
+      await assert.rejects(client.sendGroup(to, body, { requestId }), RangeError);
+    }
+    await assert.rejects(client.sendGroup([BEN], 'text', { sim: '2' }), TypeError);
+    assert.deepEqual(server.sent, []);
+  });
+
   test('send errors', async (t) => {
     const { server, client } = await pair(t);
     for (const [to, body, sim, code] of [

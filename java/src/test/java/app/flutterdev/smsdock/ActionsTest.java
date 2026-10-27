@@ -339,6 +339,105 @@ class ActionsTest extends ServerTestBase {
     }
 
     @Test
+    void sendGroup() {
+        Map<String, Object> result = client.sendGroup(
+            List.of("+43 690 8765-4321", ANNA, BEN), "Hello all", 2L, "news-1");
+        assertEquals("news-1", result.get("requestId"));
+        assertEquals(List.of(BEN, ANNA), result.get("to"));
+        assertEquals(1L, result.get("parts"));
+        assertEquals("queued", result.get("status"));
+        assertEquals(List.of(
+            FakeSmsDock.object("requestId", "news-1.1", "to", BEN, "parts", 1L,
+                "status", "queued"),
+            FakeSmsDock.object("requestId", "news-1.2", "to", ANNA, "parts", 1L,
+                "status", "queued")),
+            result.get("messages"));
+        Map<String, Object> request = server.requests("messages.sendGroup").get(0);
+        assertEquals(List.of("id", "action", "to", "body", "requestId", "sim"),
+            new ArrayList<>(request.keySet()));
+        assertEquals(List.of("+43 690 8765-4321", ANNA, BEN), request.get("to"));
+        assertEquals(2, server.sent().size());
+        assertEquals("news-1", server.sent().get(0).get("group"));
+        assertEquals(2L, server.sent().get(1).get("sim"));
+        assertEquals("sent", client.waitForResult("news-1.2", Duration.ofSeconds(5))
+            .get("status"));
+        assertEquals(BEN, client.messageStatus("news-1.1").get("to"));
+        assertEquals("not_found", assertThrows(ApiException.class,
+            () -> client.messageStatus("news-1")).getCode());
+        String random = (String) client.sendGroup(List.of(BEN), "one").get("requestId");
+        assertTrue(random.matches("[0-9a-f]{32}"));
+    }
+
+    @Test
+    void sendGroupRepeatsOnlyOnce() {
+        Map<String, Object> first = client.sendGroup(List.of(BEN, ANNA), "Same", null, "news-2");
+        assertEquals(first,
+            client.sendGroup(List.of("0690/876.54.321", ANNA), "Same", null, "news-2"));
+        assertEquals(2, server.sent().size());
+        assertTrue(waitUntil(() -> "sent".equals(server.outboxEntry("news-2.1").get("status"))));
+        Map<String, Object> later = client.sendGroup(List.of(ANNA, BEN), "Same", null, "news-2");
+        assertEquals("sent", ((Map<?, ?>) ((List<?>) later.get("messages")).get(0))
+            .get("status"));
+        for (Map.Entry<List<String>, String> other : Map.of(
+                List.of(BEN, ANNA), "Other", List.of(BEN), "Same").entrySet()) {
+            assertEquals("invalid_request", assertThrows(ApiException.class,
+                () -> client.sendGroup(other.getKey(), other.getValue(), null, "news-2"))
+                .getCode());
+        }
+        assertEquals(2, server.sent().size());
+    }
+
+    @Test
+    void sendGroupRefusesTheWholeGroup() {
+        assertEquals("invalid_number", assertThrows(ApiException.class,
+            () -> client.sendGroup(List.of(BEN, "abc"), "Hello")).getCode());
+        assertEquals("message_too_long", assertThrows(ApiException.class,
+            () -> client.sendGroup(List.of(BEN, ANNA), "x".repeat(1531))).getCode());
+        assertEquals("invalid_request", assertThrows(ApiException.class,
+            () -> client.sendGroup(List.of(BEN, ANNA, "+43123456789"), "x".repeat(1000)))
+            .getCode());
+        assertEquals("sim_unavailable", assertThrows(ApiException.class,
+            () -> client.sendGroup(List.of(BEN), "Hello", 9L, null)).getCode());
+        assertEquals(0, server.sent().size());
+    }
+
+    @Test
+    void sendGroupGoesOnAfterARefusedMember() {
+        server.refuseNumbers.add(ANNA);
+        Map<String, Object> result = client.sendGroup(List.of(BEN, ANNA), "Hello", null, "n-3");
+        List<?> members = (List<?>) result.get("messages");
+        assertEquals("queued", ((Map<?, ?>) members.get(0)).get("status"));
+        assertEquals("failed", ((Map<?, ?>) members.get(1)).get("status"));
+        assertEquals("queued", result.get("status"));
+        assertEquals("sent", client.waitForResult("n-3.1", Duration.ofSeconds(5)).get("status"));
+        assertEquals("failed", client.messageStatus("n-3.2").get("status"));
+        server.refuseNumbers.add(BEN);
+        assertEquals("failed",
+            client.sendGroup(List.of(BEN, ANNA), "Hello", null, "n-4").get("status"));
+    }
+
+    @Test
+    void sendGroupRefusesWrongValuesBeforeAnythingIsSent() {
+        List<String> many = new ArrayList<>();
+        for (int index = 0; index < 21; index++) {
+            many.add("+43699000000" + index);
+        }
+        assertThrows(IllegalArgumentException.class, () -> client.sendGroup(null, "text"));
+        assertThrows(IllegalArgumentException.class, () -> client.sendGroup(List.of(), "text"));
+        assertThrows(IllegalArgumentException.class,
+            () -> client.sendGroup(List.of(BEN, " "), "text"));
+        assertThrows(IllegalArgumentException.class, () -> client.sendGroup(many, "text"));
+        assertThrows(IllegalArgumentException.class, () -> client.sendGroup(List.of(BEN), ""));
+        for (String requestId : List.of("", "with space", "a".repeat(62))) {
+            assertThrows(IllegalArgumentException.class,
+                () -> client.sendGroup(List.of(BEN), "text", null, requestId), requestId);
+        }
+        assertEquals(0, server.requests("messages.sendGroup").size());
+        assertEquals("queued",
+            client.sendGroup(List.of(BEN), "text", null, "a".repeat(61)).get("status"));
+    }
+
+    @Test
     void sendErrors() {
         assertEquals("invalid_number", assertThrows(ApiException.class,
             () -> client.send("abc", "text")).getCode());

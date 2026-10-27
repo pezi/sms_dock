@@ -244,6 +244,30 @@ for example `Sent: …`. If the first message failed, the second run fails
 too (exit code 1); use a new id to try again. The same id with another
 number or text is an error (`invalid_request`).
 
+### send-group
+
+```bash
+smsdock send-group wss://192.168.1.50:9443/ws \
+  --to +4369912345678 +436641112223 --text 'Meeting at 10.'
+```
+
+```
+Group 3f9c…: 2 recipient(s), 1 part(s) each
+  Queued: +4369912345678, requestId 3f9c….1
+  Queued: +436641112223, requestId 3f9c….2
+```
+
+The same text goes to every number as a separate SMS; nobody sees the
+other recipients. The options are those of `send`, with `--to` taking
+several numbers (at most 20). The phone checks the whole group before it
+sends anything: a bad number, a text that is too long, fewer messages
+left in the daily limit than recipients, or more than 20 SMS parts in
+total (parts × recipients) refuse the group. A recipient the phone
+refuses afterwards is printed as `Failed`; the others are sent. With
+`--wait` the command waits for every message and ends with exit code 1
+if any of them failed. `--request-id` names the group; the members get
+the ids `ID.1`, `ID.2` and so on, which `--json` prints.
+
 ### delete
 
 ```bash
@@ -415,6 +439,7 @@ too.
 | `iterMessages({…, pageSize = 50, maxItems})` | `Stream<Message>`; same filters as `messages` |
 | `getMessage(messageId)` | `Message` |
 | `send(to, body, {sim, requestId})` | `SendResult` |
+| `sendGroup(to, body, {sim, requestId})` | `GroupSendResult`: one SMS per number in the list `to`, at most 20 |
 | `messageStatus(requestId)` | `OutboxEntry` |
 | `waitForResult(requestId, {timeout, delivered = false, pollInterval = 1 s})` | `OutboxEntry` with the status `sent`, `delivered` or `failed` |
 | `deleteMessage(messageId)` | `DeleteResult`: `{"deleted": 1, "mode": "hidden"}` |
@@ -505,6 +530,37 @@ stands for one message: using it for another recipient or text throws
 
 The status of a message is `queued` (handed to the phone), `sending`
 (some parts are left), `sent`, `delivered` or `failed`.
+
+### One text to several numbers
+
+`sendGroup()` sends the same text to every number of a list as separate
+SMS. The result names the group and holds one `SendResult` per recipient;
+their request ids are `<requestId>.1`, `<requestId>.2` and so on, and
+`waitForResult()` and `messageStatus()` take them like those of single
+messages.
+
+```dart
+final result = await dock.sendGroup(
+  ['+4369912345678', '+436641112223'],
+  'Meeting at 10.',
+  requestId: 'meeting-1',
+);
+for (final member in result.messages) {
+  if (member.status == 'failed') { // the phone refused this one at once
+    stdout.writeln('${member.to}: refused');
+    continue;
+  }
+  final outcome = await dock.waitForResult(member.requestId);
+  stdout.writeln('${member.to}: ${outcome.status}');
+}
+```
+
+The phone checks the whole group before the first SMS leaves: a number
+that is not a phone number, a text that is too long, fewer messages left
+in the daily limit of the free version than the group has recipients, or
+more SMS parts than the 20 of one minute (parts × recipients) throw
+`ApiError` and nothing is sent. A `requestId` of a group has at most 61
+characters and makes the group safe to repeat, as for `send()`.
 
 ### Events and hooks
 
@@ -725,7 +781,7 @@ try {
 
 ## Examples
 
-The directory [example/](example) contains four short programs. Each
+The directory [example/](example) contains five short programs. Each
 takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 `SMSDOCK_FINGERPRINT`.
 
@@ -733,12 +789,14 @@ takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 | --- | --- |
 | [list_messages.dart](example/list_messages.dart) | The last 10 incoming SMS |
 | [send_sms.dart](example/send_sms.dart) | Send one SMS and wait for the result |
+| [send_group_sms.dart](example/send_group_sms.dart) | Send one text to several numbers, one SMS each, and wait for every result |
 | [listen_incoming.dart](example/listen_incoming.dart) | Hook: call a function for every incoming SMS, also for those that arrived while the connection was down |
 | [auto_reply.dart](example/auto_reply.dart) | Hook that answers incoming SMS, with guards against reply loops |
 
 ```bash
 dart run example/list_messages.dart wss://192.168.1.50:9443/ws
 dart run example/send_sms.dart wss://192.168.1.50:9443/ws +4369912345678 'Hello'
+dart run example/send_group_sms.dart wss://192.168.1.50:9443/ws 'Hello all' +4369912345678 +436641112223
 dart run example/listen_incoming.dart wss://192.168.1.50:9443/ws
 dart run example/auto_reply.dart wss://192.168.1.50:9443/ws
 ```

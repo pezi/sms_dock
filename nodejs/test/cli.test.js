@@ -389,6 +389,52 @@ describe('commands', needTls, () => {
     assert.equal(server.sent.length, 2);
   });
 
+  test('send-group', async (t) => {
+    const server = await startServer(t);
+    const args = cliArguments(server);
+    let { code, out } = await runCli(
+      args(
+        'send-group', '--to', BEN, '--to', ANNA, '--text', 'Hello all',
+        '--request-id', 'news-1', '--sim', '2',
+      ),
+    );
+    assert.equal(code, 0);
+    assert.equal(
+      out,
+      'Group news-1: 2 recipient(s), 1 part(s) each\n' +
+        `  Queued: ${BEN}, requestId news-1.1\n` +
+        `  Queued: ${ANNA}, requestId news-1.2\n`,
+    );
+    assert.deepEqual(
+      server.sent.map((m) => [m.to, m.body, m.sim]),
+      [[BEN, 'Hello all', 2], [ANNA, 'Hello all', 2]],
+    );
+
+    ({ code, out } = await runCli(
+      args('send-group', '--to', BEN, '--request-id', 'news-2', '--json'),
+      { input: 'From stdin\n' },
+    ));
+    assert.equal(code, 0);
+    assert.deepEqual(JSON.parse(out), {
+      requestId: 'news-2', to: [BEN], parts: 1, status: 'queued',
+      messages: [{ requestId: 'news-2.1', to: BEN, parts: 1, status: 'queued' }],
+    });
+
+    server.failNumbers.add(ANNA);
+    let err;
+    ({ code, out, err } = await runCli(
+      args('send-group', '--to', BEN, '--to', ANNA, '--text', 'Hello', '--request-id', 'news-3', '--wait'),
+    ));
+    assert.equal(code, 1);
+    assert.equal(
+      out,
+      'Group news-3: 2 recipient(s), 1 part(s) each\n' +
+        `  Sent: ${BEN}, requestId news-3.1\n` +
+        `  Failed: ${ANNA}, error code 1, requestId news-3.2\n`,
+    );
+    assert.equal(err, 'smsdock: 1 of 2 message(s) failed\n');
+  });
+
   test('send and wait', async (t) => {
     const server = await startServer(t);
     const args = cliArguments(server);

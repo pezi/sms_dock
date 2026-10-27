@@ -252,6 +252,40 @@ pub struct SendResult {
     pub extra: Extra,
 }
 
+/// Result of `messages.sendGroup`: one SMS per recipient.
+///
+/// `messages` holds one [`SendResult`] per recipient in the order of `to`,
+/// with the request ids `<request_id>.1`, `<request_id>.2` and so on.
+/// `status` is the least advanced status of the members, or `failed` when
+/// every member failed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupSendResult {
+    /// Request id of the group.
+    pub request_id: String,
+    /// Numbers as they are sent, in the order of `messages`.
+    pub to: Vec<String>,
+    /// Number of SMS parts of the text, the same for every recipient.
+    pub parts: i64,
+    /// State of the group.
+    pub status: String,
+    /// What the phone said for each recipient.
+    pub messages: Vec<SendResult>,
+    /// Fields unknown to this crate.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl GroupSendResult {
+    /// Number of recipients the phone refused at once.
+    pub fn failed_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|member| member.status == "failed")
+            .count()
+    }
+}
+
 /// State of a message sent through SMS Dock.
 ///
 /// `status` is `queued` (handed to the phone), `sending` (some parts are

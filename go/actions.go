@@ -13,6 +13,12 @@ import (
 
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// groupRequestIDPattern leaves room for the member suffix ".NN".
+var groupRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,61}$`)
+
+// MaxGroupRecipients is the number of recipients of one group message.
+const MaxGroupRecipients = 20
+
 const (
 	defaultPageSize = 50
 	// firstPoll is the pause before WaitForResult asks a second time.
@@ -218,6 +224,69 @@ func (c *Client) Send(
 		fields["sim"] = *settings.Sim
 	}
 	return call[SendResult](ctx, c, "messages.send", fields)
+}
+
+// SendGroup sends one text to several numbers, one SMS each. options may
+// be nil.
+//
+// to holds 1 to MaxGroupRecipients phone numbers; repeated numbers are
+// sent once. Every recipient gets a separate SMS and does not see the
+// others. The result holds one SendResult per recipient; their request
+// ids are "<RequestID>.1", "<RequestID>.2" and so on, and WaitForResult
+// and MessageStatus take them like those of single messages.
+//
+// The phone checks the whole group before it sends anything: a number
+// that is not a phone number (invalid_number), a text that is too long,
+// fewer messages left in the daily limit of the free version than the
+// group has recipients (quota_exceeded) or more SMS parts than the 20 of
+// one minute, parts times recipients (invalid_request), refuse the whole
+// group. A refusal by the phone for one recipient does not stop the
+// others; that member has the status "failed" in Messages.
+//
+// SendOptions.RequestID has at most 61 characters here and works as for
+// Send: the same id with the same text and numbers is not sent again but
+// answered with the stored members and their current status.
+func (c *Client) SendGroup(
+	ctx context.Context, to []string, body string, options *SendOptions,
+) (*GroupSendResult, error) {
+	var settings SendOptions
+	if options != nil {
+		settings = *options
+	}
+	if len(to) == 0 {
+		return nil, argumentError("'to' must be a list of phone numbers")
+	}
+	if len(to) > MaxGroupRecipients {
+		return nil, argumentError(
+			"'to' holds more than %d numbers", MaxGroupRecipients)
+	}
+	for _, number := range to {
+		if strings.TrimSpace(number) == "" {
+			return nil, argumentError("'to' must be a list of phone numbers")
+		}
+	}
+	if body == "" {
+		return nil, argumentError("'body' must be a text")
+	}
+	requestID := settings.RequestID
+	if requestID == "" {
+		random := make([]byte, 16)
+		if _, err := rand.Read(random); err != nil {
+			return nil, err
+		}
+		requestID = hex.EncodeToString(random)
+	} else if !groupRequestIDPattern.MatchString(requestID) {
+		return nil, argumentError(
+			"The request id of a group must be 1 to 61 characters of " +
+				"A-Z a-z 0-9 . _ -")
+	}
+	fields := map[string]any{
+		"to": append([]string{}, to...), "body": body, "requestId": requestID,
+	}
+	if settings.Sim != nil {
+		fields["sim"] = *settings.Sim
+	}
+	return call[GroupSendResult](ctx, c, "messages.sendGroup", fields)
 }
 
 // MessageStatus returns the outbox entry of a message sent through SMS

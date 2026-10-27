@@ -147,9 +147,10 @@ public class CliTests : ServerTestBase
         (_, _, errors) = await RunAsync(["unknown"]);
         Assert.Equal(
             "usage: smsdock [-h]\n"
-            + "               {fingerprint,status,conversations,messages,send,delete,mark-read,contacts,listen} ...\n"
+            + "               {fingerprint,status,conversations,messages,send,send-group,delete,mark-read,contacts,"
+            + "listen} ...\n"
             + "smsdock: error: argument command: invalid choice: 'unknown' (choose from 'fingerprint', 'status', "
-            + "'conversations', 'messages', 'send', 'delete', 'mark-read', 'contacts', 'listen')\n",
+            + "'conversations', 'messages', 'send', 'send-group', 'delete', 'mark-read', 'contacts', 'listen')\n",
             errors);
     }
 
@@ -434,6 +435,51 @@ public class CliTests : ServerTestBase
         var requestId = (string?)Server.Sent[0]["requestId"];
         Assert.Equal($"Queued: {Ben}, 1 part(s), requestId {requestId}\n", output);
         Assert.Equal("All systems running.", (string?)Server.Sent[0]["body"]);
+    }
+
+    [Fact]
+    public async Task SendGroup()
+    {
+        var (code, output, _) = await RunAsync(Arguments(
+            "send-group", "--to", Ben, Anna, "--text", "Hello all", "--request-id", "news-1", "--sim", "2"));
+        Assert.Equal(0, code);
+        Assert.Equal(
+            "Group news-1: 2 recipient(s), 1 part(s) each\n"
+            + $"  Queued: {Ben}, requestId news-1.1\n"
+            + $"  Queued: {Anna}, requestId news-1.2\n",
+            output);
+        Assert.Equal(
+            [(Ben, "Hello all", 2L), (Anna, "Hello all", 2L)],
+            Server.Sent.Select(sent => ((string?)sent["to"], (string?)sent["body"], (long?)sent["sim"])));
+    }
+
+    [Fact]
+    public async Task SendGroupAndWait()
+    {
+        Server.FailNumber(Anna);
+        var (code, output, errors) = await RunAsync(Arguments(
+            "send-group", "--to", Ben, Anna, "--text", "Hello all", "--request-id", "news-2", "--wait"));
+        Assert.Equal(1, code);
+        Assert.Equal(
+            "Group news-2: 2 recipient(s), 1 part(s) each\n"
+            + $"  Sent: {Ben}, requestId news-2.1\n"
+            + $"  Failed: {Anna}, error code 1, requestId news-2.2\n",
+            output);
+        Assert.Equal("smsdock: 1 of 2 message(s) failed\n", errors);
+    }
+
+    [Fact]
+    public async Task SendGroupJson()
+    {
+        var (code, output, _) = await RunAsync(Arguments(
+            "send-group", "--to", Ben, "--text", "Hello", "--request-id", "news-3", "--json"));
+        Assert.Equal(0, code);
+        AssertJson(
+            $$"""
+            {"requestId":"news-3","to":["{{Ben}}"],"parts":1,"status":"queued",
+             "messages":[{"requestId":"news-3.1","to":"{{Ben}}","parts":1,"status":"queued"}]}
+            """,
+            JsonNode.Parse(output));
     }
 
     [Fact]

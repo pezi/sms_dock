@@ -100,8 +100,8 @@ options:
 ''';
 
 const String mainUsage = 'usage: smsdock [-h]\n'
-    '               {fingerprint,status,conversations,messages,send,delete,'
-    'mark-read,contacts,listen} ...\n';
+    '               {fingerprint,status,conversations,messages,send,'
+    'send-group,delete,mark-read,contacts,listen} ...\n';
 
 const String deleteUsage = '''
 usage: smsdock delete [-h] [--fingerprint HEX] [--insecure]
@@ -176,8 +176,12 @@ void main() {
       Arguments parse(List<String> argv) =>
           parseCommandLine(argv, environment: {});
       expect(
-        parse(['status', url, '--reconnect-attempts', '-1'])[
-            'reconnect-attempts'],
+        parse([
+          'status',
+          url,
+          '--reconnect-attempts',
+          '-1',
+        ])['reconnect-attempts'],
         -1,
       );
       expect(parse(['status', '--timeout=2.5', url])['timeout'], 2.5);
@@ -186,12 +190,16 @@ void main() {
         ['sms.sent', '*'],
       );
       expect(
-          parse(['send', url, '--to', anna, '--text', 'a b'])['text'], 'a b');
+        parse(['send', url, '--to', anna, '--text', 'a b'])['text'],
+        'a b',
+      );
       expect(parse(['messages', url, '--limit', ' 7 '])['limit'], 7);
       expect(parse(['status', '--', url])['url'], url);
       final local = DateTime(2026, 9, 29, 8).millisecondsSinceEpoch;
-      expect(parse(['messages', url, '--since', '2026-09-29T08:00'])['since'],
-          local);
+      expect(
+        parse(['messages', url, '--since', '2026-09-29T08:00'])['since'],
+        local,
+      );
       expect(
         parse(['messages', url, '--since', '2026-09-29'])['since'],
         DateTime(2026, 9, 29).millisecondsSinceEpoch,
@@ -207,12 +215,10 @@ void main() {
     });
 
     test('fingerprint from the environment', () {
-      final args = parseCommandLine([
-        'status',
-        url,
-      ], environment: {
-        'SMSDOCK_FINGERPRINT': fingerprint
-      });
+      final args = parseCommandLine(
+        ['status', url],
+        environment: {'SMSDOCK_FINGERPRINT': fingerprint},
+      );
       expect(args['fingerprint'], fingerprint);
     });
 
@@ -257,7 +263,7 @@ void main() {
         err,
         '${mainUsage}smsdock: error: argument command: invalid choice: '
         "'unknown' (choose from 'fingerprint', 'status', 'conversations', "
-        "'messages', 'send', 'delete', 'mark-read', 'contacts', 'listen')\n",
+        "'messages', 'send', 'send-group', 'delete', 'mark-read', 'contacts', 'listen')\n",
       );
       (_, _, err) = await run(['status', url, 'extra', '--more']);
       expect(
@@ -612,9 +618,13 @@ void main() {
       expect(lines[3], contains('A1'));
       // The columns are as wide as their longest cell.
       expect(
-          lines[3], matches(RegExp(r'^172  \d{4}-\d\d-\d\d \d\d:\d\d  A1  ')));
-      expect(lines[3],
-          endsWith('            1     1       in   Your bill is ready'));
+        lines[3],
+        matches(RegExp(r'^172  \d{4}-\d\d-\d\d \d\d:\d\d  A1  ')),
+      );
+      expect(
+        lines[3],
+        endsWith('            1     1       in   Your bill is ready'),
+      );
 
       (code, out, _) = await run(
         build('conversations', [
@@ -726,10 +736,7 @@ void main() {
       var (code, out, _) = await run(build('messages', ['--limit', '1']));
       expect(code, 0);
       final line = const LineSplitter().convert(out)[1];
-      expect(
-        line,
-        endsWith('  First line second line ${'ü' * 36}…'),
-      );
+      expect(line, endsWith('  First line second line ${'ü' * 36}…'));
       (code, out, _) = await run(build('messages', ['--limit', '1', '--json']));
       expect(bodiesOf(out).single, startsWith('First line\nsecond  line'));
     });
@@ -737,13 +744,76 @@ void main() {
     test('send', () async {
       final server = await startServer();
       final (code, out, _) = await run(
-        arguments(server)(
-            'send', ['--to', ben, '--text', 'All systems running.']),
+        arguments(server)('send', [
+          '--to',
+          ben,
+          '--text',
+          'All systems running.',
+        ]),
       );
       expect(code, 0);
       final requestId = server.sent[0]['requestId'];
       expect(out, 'Queued: $ben, 1 part(s), requestId $requestId\n');
       expect(server.sent[0]['body'], 'All systems running.');
+    });
+
+    test('send-group', () async {
+      final server = await startServer();
+      final (code, out, _) = await run(
+        arguments(server)('send-group', [
+          '--to', ben, anna, '--text', 'Hello all', '--request-id', 'news-1', //
+          '--sim', '2',
+        ]),
+      );
+      expect(code, 0);
+      expect(
+        out,
+        'Group news-1: 2 recipient(s), 1 part(s) each\n'
+        '  Queued: $ben, requestId news-1.1\n'
+        '  Queued: $anna, requestId news-1.2\n',
+      );
+      expect(
+        [for (final m in server.sent) (m['to'], m['body'], m['sim'])],
+        [(ben, 'Hello all', 2), (anna, 'Hello all', 2)],
+      );
+    });
+
+    test('send-group and wait', () async {
+      final server = await startServer();
+      server.failNumbers.add(anna);
+      final (code, out, err) = await run(
+        arguments(server)('send-group', [
+          '--to', ben, anna, '--text', 'Hello all', //
+          '--request-id', 'news-2', '--wait',
+        ]),
+      );
+      expect(code, 1);
+      expect(
+        out,
+        'Group news-2: 2 recipient(s), 1 part(s) each\n'
+        '  Sent: $ben, requestId news-2.1\n'
+        '  Failed: $anna, error code 1, requestId news-2.2\n',
+      );
+      expect(err, 'smsdock: 1 of 2 message(s) failed\n');
+    });
+
+    test('send-group json', () async {
+      final server = await startServer();
+      final (code, out, _) = await run(
+        arguments(server)('send-group', [
+          '--to', ben, '--text', 'Hello', '--request-id', 'news-3', '--json', //
+        ]),
+      );
+      expect(code, 0);
+      expect(decode(out), {
+        'requestId': 'news-3',
+        'to': [ben],
+        'parts': 1,
+        'status': 'queued',
+        'messages': [
+          {'requestId': 'news-3.1', 'to': ben, 'parts': 1, 'status': 'queued'},
+        ],
+      });
     });
 
     test('send from standard input', () async {
@@ -844,13 +914,10 @@ void main() {
         '--to', '+43123456', '--text', 'Hello', '--request-id', 'job-1', //
       ]);
       var (code, out, err) = await run(command);
-      expect((
-        code,
-        out
-      ), (
-        0,
-        'Queued: +43123456, 1 part(s), requestId job-1\n',
-      ));
+      expect(
+        (code, out),
+        (0, 'Queued: +43123456, 1 part(s), requestId job-1\n'),
+      );
       expect(
         await waitUntil(() => server.outbox['job-1']!['status'] == 'failed'),
         isTrue,
@@ -975,9 +1042,7 @@ void main() {
 
     test('listen', () async {
       final server = await startServer();
-      unawaited(
-        incomingLater(server, [(anna, 'STATUS'), ('A1', 'Your bill')]),
-      );
+      unawaited(incomingLater(server, [(anna, 'STATUS'), ('A1', 'Your bill')]));
       final (code, out, err) = await run(
         arguments(server)('listen', ['--count', '2']),
       );
@@ -1046,7 +1111,8 @@ void main() {
       expect(
         out,
         endsWith(
-            '  sms.delivered requestId=r1 id=7 conversationId=171 to=$ben\n'),
+          '  sms.delivered requestId=r1 id=7 conversationId=171 to=$ben\n',
+        ),
       );
       expect(
         err,
@@ -1095,9 +1161,8 @@ void main() {
       final interrupts = StreamController<void>();
       addTearDown(interrupts.close);
       unawaited(
-        waitUntil(
-          () => countOf(server, 'subscribe') > 0,
-        ).then((_) => interrupts.add(null)),
+        waitUntil(() => countOf(server, 'subscribe') > 0)
+            .then((_) => interrupts.add(null)),
       );
       final (code, out, _) = await run(
         arguments(server)('listen'),
@@ -1156,9 +1221,7 @@ void main() {
       expect((code, out), (1, ''));
       expect(err, 'smsdock: not_found: No message with the id 1.\n');
 
-      (code, _, err) = await run(
-        build('send', ['--to', 'abc', '--text', 'x']),
-      );
+      (code, _, err) = await run(build('send', ['--to', 'abc', '--text', 'x']));
       expect(code, 1);
       expect(err, contains('invalid_number'));
 

@@ -218,6 +218,30 @@ for example `Sent: …`. If the first message failed, the second run fails
 too (exit code 1); use a new id to try again. The same id with another
 number or text is an error (`invalid_request`).
 
+### send-group
+
+```bash
+smsdock send-group wss://192.168.1.50:9443/ws \
+  --to +4369912345678 --to +436641112223 --text 'Meeting at 10.'
+```
+
+```
+Group 3f9c…: 2 recipient(s), 1 part(s) each
+  Queued: +4369912345678, requestId 3f9c….1
+  Queued: +436641112223, requestId 3f9c….2
+```
+
+The same text goes to every number as a separate SMS; nobody sees the
+other recipients. The options are those of `send`, with `--to` repeated
+for every recipient (at most 20). The phone checks the whole group before
+it sends anything: a bad number, a text that is too long, fewer messages
+left in the daily limit than recipients, or more than 20 SMS parts in
+total (parts × recipients) refuse the group. A recipient the phone
+refuses afterwards is printed as `Failed`; the others are sent. With
+`--wait` the command waits for every message and ends with exit code 1
+if any of them failed. `--request-id` names the group; the members get
+the ids `ID.1`, `ID.2` and so on, which `--json` prints.
+
 ### delete
 
 ```bash
@@ -366,6 +390,7 @@ matching `TypedDict` definitions for editors and type checkers.
 | `iter_messages(…, page_size=50, max_items=None)` | Iterator of Message; same filters as `messages` |
 | `get_message(message_id)` | Message |
 | `send(to, body, sim=None, request_id=None)` | SendResult |
+| `send_group(to, body, sim=None, request_id=None)` | GroupSendResult: one SMS per number in the list `to`, at most 20 |
 | `message_status(request_id)` | Outbox entry |
 | `wait_for_result(request_id, timeout=None, delivered=False, poll_interval=1.0)` | Outbox entry with the status `sent`, `delivered` or `failed` |
 | `delete_message(message_id)` | `{"deleted": 1, "mode": "hidden"}` |
@@ -451,6 +476,33 @@ stands for one message: using it for another recipient or text raises
 
 The status of a message is `queued` (handed to the phone), `sending`
 (some parts are left), `sent`, `delivered` or `failed`.
+
+### One text to several numbers
+
+`send_group()` sends the same text to every number of a list as separate
+SMS. The result names the group and holds one SendResult per recipient;
+their request ids are `<requestId>.1`, `<requestId>.2` and so on, and
+`wait_for_result()` and `message_status()` take them like those of
+single messages.
+
+```python
+result = dock.send_group(
+    ["+4369912345678", "+436641112223"], "Meeting at 10.", request_id="meeting-1"
+)
+for member in result["messages"]:
+    if member["status"] == "failed":          # the phone refused this one at once
+        print(member["to"], "refused")
+        continue
+    outcome = dock.wait_for_result(member["requestId"], timeout=60)
+    print(member["to"], outcome["status"])
+```
+
+The phone checks the whole group before the first SMS leaves: a number
+that is not a phone number, a text that is too long, fewer messages left
+in the daily limit of the free version than the group has recipients, or
+more SMS parts than the 20 of one minute (parts × recipients) raise
+`ApiError` and nothing is sent. A `request_id` of a group has at most 61
+characters and makes the group safe to repeat, as for `send()`.
 
 ### Events and hooks
 
@@ -625,7 +677,7 @@ except SmsDockError as error:
 
 ## Examples
 
-The directory [examples/](examples) contains four short programs. Each
+The directory [examples/](examples) contains five short programs. Each
 takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 `SMSDOCK_FINGERPRINT`.
 
@@ -633,12 +685,14 @@ takes the URL as its first argument and reads `SMSDOCK_PASSWORD` and
 | --- | --- |
 | [list_messages.py](examples/list_messages.py) | The last 10 incoming SMS |
 | [send_sms.py](examples/send_sms.py) | Send one SMS and wait for the result |
+| [send_group_sms.py](examples/send_group_sms.py) | Send one text to several numbers, one SMS each, and wait for every result |
 | [listen_incoming.py](examples/listen_incoming.py) | Hook: call a function for every incoming SMS, also for those that arrived while the connection was down |
 | [auto_reply.py](examples/auto_reply.py) | Hook that answers incoming SMS, with guards against reply loops |
 
 ```bash
 python3 examples/list_messages.py wss://192.168.1.50:9443/ws
 python3 examples/send_sms.py wss://192.168.1.50:9443/ws +4369912345678 'Hello'
+python3 examples/send_group_sms.py wss://192.168.1.50:9443/ws 'Hello all' +4369912345678 +436641112223
 python3 examples/listen_incoming.py wss://192.168.1.50:9443/ws
 python3 examples/auto_reply.py wss://192.168.1.50:9443/ws
 ```

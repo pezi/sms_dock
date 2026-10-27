@@ -176,12 +176,14 @@ type OutboxEntry struct {
 	CreatedAt int64  `json:"createdAt"`
 }
 
-// SentMessage is one message handed to the (imaginary) radio.
+// SentMessage is one message handed to the (imaginary) radio. Group is
+// the request id of the group message it belongs to, or "".
 type SentMessage struct {
 	RequestID string
 	To        string
 	Body      string
 	Sim       int
+	Group     string
 }
 
 type conversation struct {
@@ -290,6 +292,7 @@ type Server struct {
 	outbox           map[string]*OutboxEntry
 	bodies           map[string]string
 	failNumbers      map[string]bool
+	refuseNumbers    map[string]bool
 	sent             []SentMessage
 	requests         []map[string]any
 	refusedCount     int
@@ -317,6 +320,7 @@ func Start(options *Options) (*Server, error) {
 		outbox:          make(map[string]*OutboxEntry),
 		bodies:          make(map[string]string),
 		failNumbers:     make(map[string]bool),
+		refuseNumbers:   make(map[string]bool),
 		nextMessageID:   2800,
 		drops:           make(map[string][]string),
 		failures:        make(map[string][]*failure),
@@ -556,6 +560,17 @@ func (s *Server) FailNumbers(numbers ...string) {
 	s.failNumbers = make(map[string]bool)
 	for _, number := range numbers {
 		s.failNumbers[number] = true
+	}
+}
+
+// RefuseNumbers sets the numbers the phone refuses at once: a message to
+// them is failed with the reason send_refused before anything is sent.
+func (s *Server) RefuseNumbers(numbers ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refuseNumbers = make(map[string]bool)
+	for _, number := range numbers {
+		s.refuseNumbers[number] = true
 	}
 }
 
@@ -1034,6 +1049,8 @@ func (s *Server) dispatch(
 		result, err = s.contactsList(request)
 	case "messages.send":
 		result, err = s.messagesSend(request)
+	case "messages.sendGroup":
+		result, err = s.messagesSendGroup(request)
 	case "subscribe":
 		result, err = s.subscribe(connected, request)
 	case "unsubscribe":
@@ -1465,6 +1482,18 @@ func (s *Server) messagesSend(request map[string]any) (any, *failure) {
 			}, nil
 		}
 	}
+	chosen, err := s.subscription(simChoice)
+	if err != nil {
+		return nil, err
+	}
+	identifier := requestIDOrRandom(requestID)
+	entry := s.accept(identifier, number, *body, parts, chosen, "")
+	return sendResult(entry), nil
+}
+
+// subscription returns the SIM to send with; the default one without a
+// choice.
+func (s *Server) subscription(simChoice *int64) (int, *failure) {
 	chosen := 0
 	if simChoice == nil {
 		for _, candidate := range s.sims {
@@ -1472,43 +1501,205 @@ func (s *Server) messagesSend(request map[string]any) (any, *failure) {
 				chosen = candidate.SubscriptionID
 			}
 		}
-	} else {
-		for _, candidate := range s.sims {
-			if int64(candidate.SubscriptionID) == *simChoice {
-				chosen = candidate.SubscriptionID
-			}
-		}
-		if chosen == 0 {
-			return nil, fail("sim_unavailable", fmt.Sprintf(
-				"No SIM with the subscription id %d.", *simChoice))
+		return chosen, nil
+	}
+	for _, candidate := range s.sims {
+		if int64(candidate.SubscriptionID) == *simChoice {
+			chosen = candidate.SubscriptionID
 		}
 	}
-	identifier := ""
+	if chosen == 0 {
+		return 0, fail("sim_unavailable", fmt.Sprintf(
+			"No SIM with the subscription id %d.", *simChoice))
+	}
+	return chosen, nil
+}
+
+func requestIDOrRandom(requestID *string) string {
 	if requestID != nil {
-		identifier = *requestID
-	} else {
-		random := make([]byte, 16)
-		rand.Read(random)
-		identifier = hex.EncodeToString(random)
+		return *requestID
 	}
+	random := make([]byte, 16)
+	rand.Read(random)
+	return hex.EncodeToString(random)
+}
+
+// accept queues one message that passed the checks and starts sending
+// it. The entry comes back failed when the phone refuses the number at
+// once (RefuseNumbers).
+func (s *Server) accept(
+	identifier, number, body string, parts, sim int, group string,
+) *OutboxEntry {
 	entry := &OutboxEntry{
 		RequestID: identifier, To: number, Parts: parts, Status: "queued",
-		Sim: &chosen, Source: "api", CreatedAt: time.Now().UnixMilli(),
+		Sim: &sim, Source: "api", CreatedAt: time.Now().UnixMilli(),
 	}
 	s.outbox[identifier] = entry
-	s.bodies[identifier] = *body
+	s.bodies[identifier] = body
 	s.sent = append(s.sent, SentMessage{
-		RequestID: identifier, To: number, Body: *body, Sim: chosen,
+		RequestID: identifier, To: number, Body: body, Sim: sim, Group: group,
 	})
 	s.emit("sms.queued", Object{
 		{"requestId", identifier}, {"to", number}, {"parts", parts},
-		{"sim", chosen}, {"source", "api"},
+		{"sim", sim}, {"source", "api"},
 	})
-	go s.transmit(entry, *body)
+	if s.refuseNumbers[number] {
+		entry.Status = "failed"
+		s.emit("sms.failed", Object{
+			{"requestId", identifier}, {"id", nil}, {"conversationId", nil},
+			{"to", number}, {"errorCode", nil}, {"reason", "send_refused"},
+		})
+		return entry
+	}
+	go s.transmit(entry, body)
+	return entry
+}
+
+func sendResult(entry *OutboxEntry) Object {
 	return Object{
-		{"requestId", identifier}, {"to", number}, {"parts", parts},
-		{"status", "queued"},
-	}, nil
+		{"requestId", entry.RequestID}, {"to", entry.To},
+		{"parts", entry.Parts}, {"status", entry.Status},
+	}
+}
+
+var statusOrder = []string{"queued", "sending", "sent", "delivered"}
+
+// groupResult builds the GroupSendResult of members as the app does.
+func groupResult(identifier string, members []*OutboxEntry) Object {
+	status := "failed"
+	rank := len(statusOrder)
+	numbers := make([]string, 0, len(members))
+	results := make([]Object, 0, len(members))
+	for _, member := range members {
+		numbers = append(numbers, member.To)
+		results = append(results, sendResult(member))
+		if member.Status == "failed" {
+			continue
+		}
+		for index, candidate := range statusOrder {
+			if candidate == member.Status && index < rank {
+				status, rank = candidate, index
+			}
+		}
+	}
+	return Object{
+		{"requestId", identifier}, {"to", numbers},
+		{"parts", members[0].Parts}, {"status", status},
+		{"messages", results},
+	}
+}
+
+// knownGroup returns the members of a group sent before, oldest first.
+func (s *Server) knownGroup(identifier string) []*OutboxEntry {
+	var members []*OutboxEntry
+	for index := 1; ; index++ {
+		member := s.outbox[fmt.Sprintf("%s.%d", identifier, index)]
+		if member == nil {
+			return members
+		}
+		members = append(members, member)
+	}
+}
+
+func (s *Server) messagesSendGroup(request map[string]any) (any, *failure) {
+	rawTo, present := request["to"]
+	if !present || rawTo == nil {
+		return nil, fail("invalid_request", "The field 'to' is missing.")
+	}
+	items, isList := rawTo.([]any)
+	if !isList {
+		return nil, fail("invalid_request", "The field 'to' is malformed.")
+	}
+	if len(items) == 0 {
+		return nil, fail("invalid_request", "'to' is missing.")
+	}
+	body, err := optionalText(request, "body")
+	if err != nil {
+		return nil, err
+	}
+	if body == nil {
+		return nil, fail("invalid_request", "The field 'body' is missing.")
+	}
+	simChoice, err := optionalInt(request, "sim")
+	if err != nil {
+		return nil, err
+	}
+	requestID, err := optionalText(request, "requestId")
+	if err != nil {
+		return nil, err
+	}
+	var numbers []string
+	for _, item := range items {
+		text, isText := item.(string)
+		if !isText {
+			return nil, fail("invalid_request", "'to' must contain strings.")
+		}
+		number := NormalizeNumber(text)
+		if !numberPattern.MatchString(number) {
+			return nil, fail("invalid_number", fmt.Sprintf(
+				"'to' contains '%s', which is not a phone number.", text))
+		}
+		known := false
+		for _, other := range numbers {
+			known = known || samePeer(other, number)
+		}
+		if !known {
+			numbers = append(numbers, number)
+		}
+	}
+	if len(numbers) > 20 {
+		return nil, fail("invalid_request",
+			"A group message goes to at most 20 recipients.")
+	}
+	if *body == "" {
+		return nil, fail("invalid_request", "'body' is empty.")
+	}
+	parts := CountParts(*body)
+	if parts > 10 {
+		return nil, fail("message_too_long", fmt.Sprintf(
+			"The message needs %d SMS parts; at most 10 are allowed.", parts))
+	}
+	if requestID != nil &&
+		(!requestIDPattern.MatchString(*requestID) || len(*requestID) > 61) {
+		return nil, fail("invalid_request",
+			"'requestId' of a group must be 1 to 61 characters of "+
+				"A-Z a-z 0-9 . _ -.")
+	}
+	identifier := requestIDOrRandom(requestID)
+	if known := s.knownGroup(identifier); len(known) > 0 {
+		same := len(known) == len(numbers)
+		for _, member := range known {
+			same = same && s.bodies[member.RequestID] == *body
+		}
+		for _, number := range numbers {
+			found := false
+			for _, member := range known {
+				found = found || samePeer(member.To, number)
+			}
+			same = same && found
+		}
+		if !same {
+			return nil, fail("invalid_request",
+				"'requestId' was already used for another message.")
+		}
+		return groupResult(identifier, known), nil
+	}
+	if total := parts * len(numbers); total > 20 {
+		return nil, fail("invalid_request", fmt.Sprintf(
+			"This group needs %d SMS parts; at most 20 can be sent per "+
+				"minute. Send to fewer recipients or shorten the text.", total))
+	}
+	chosen, err := s.subscription(simChoice)
+	if err != nil {
+		return nil, err
+	}
+	members := make([]*OutboxEntry, 0, len(numbers))
+	for index, number := range numbers {
+		members = append(members, s.accept(
+			fmt.Sprintf("%s.%d", identifier, index+1), number, *body, parts,
+			chosen, identifier))
+	}
+	return groupResult(identifier, members), nil
 }
 
 func (s *Server) transmit(entry *OutboxEntry, body string) {

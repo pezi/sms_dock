@@ -418,6 +418,57 @@ def test_send(
     assert server.sent[0]["body"] == "All systems running."
 
 
+def test_send_group(
+    capsys: pytest.CaptureFixture[str], server: FakeSmsDock, arguments: Arguments
+) -> None:
+    code, out, _ = run(capsys, arguments(
+        "send-group", "--to", BEN, "--to", ANNA, "--text", "Hello all",
+        "--request-id", "news-1", "--sim", "2",
+    ))
+    assert code == 0
+    assert out == (
+        "Group news-1: 2 recipient(s), 1 part(s) each\n"
+        f"  Queued: {BEN}, requestId news-1.1\n"
+        f"  Queued: {ANNA}, requestId news-1.2\n"
+    )
+    assert [(m["to"], m["body"], m["sim"]) for m in server.sent] == [
+        (BEN, "Hello all", 2), (ANNA, "Hello all", 2),
+    ]
+
+
+def test_send_group_and_wait(
+    capsys: pytest.CaptureFixture[str], server: FakeSmsDock, arguments: Arguments
+) -> None:
+    server.fail_numbers.add(ANNA)
+    code, out, err = run(capsys, arguments(
+        "send-group", "--to", BEN, "--to", ANNA, "--text", "Hello all",
+        "--request-id", "news-2", "--wait",
+    ))
+    assert code == 1
+    assert out == (
+        "Group news-2: 2 recipient(s), 1 part(s) each\n"
+        f"  Sent: {BEN}, requestId news-2.1\n"
+        f"  Failed: {ANNA}, error code 1, requestId news-2.2\n"
+    )
+    assert err == "smsdock: 1 of 2 message(s) failed\n"
+
+
+def test_send_group_json(
+    capsys: pytest.CaptureFixture[str], server: FakeSmsDock, arguments: Arguments
+) -> None:
+    code, out, _ = run(capsys, arguments(
+        "send-group", "--to", BEN, "--text", "Hello", "--request-id", "news-3",
+        "--json",
+    ))
+    assert code == 0
+    assert json.loads(out) == {
+        "requestId": "news-3", "to": [BEN], "parts": 1, "status": "queued",
+        "messages": [
+            {"requestId": "news-3.1", "to": BEN, "parts": 1, "status": "queued"},
+        ],
+    }
+
+
 def test_send_from_standard_input(
     capsys: pytest.CaptureFixture[str],
     server: FakeSmsDock,
